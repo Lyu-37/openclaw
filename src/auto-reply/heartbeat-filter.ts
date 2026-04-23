@@ -1,8 +1,11 @@
 import { stripHeartbeatToken } from "./heartbeat.js";
+import { stripSilentToken } from "./tokens.js";
 
 const HEARTBEAT_TASK_PROMPT_PREFIX =
   "Run the following periodic tasks (only those due based on their intervals):";
 const HEARTBEAT_TASK_PROMPT_ACK = "After completing all due tasks, reply HEARTBEAT_OK.";
+const MEMORY_FLUSH_PROMPT_PREFIX = "Pre-compaction memory flush.";
+const MEMORY_FLUSH_ACK = "NO_REPLY";
 
 function resolveMessageText(content: unknown): { text: string; hasNonTextContent: boolean } {
   if (typeof content === "string") {
@@ -65,13 +68,57 @@ export function isHeartbeatOkResponse(
   if (hasNonTextContent) {
     return false;
   }
-  return stripHeartbeatToken(text, { mode: "heartbeat", maxAckChars: ackMaxChars }).shouldSkip;
+  const parsedAckChars =
+    typeof ackMaxChars === "string" ? Number(ackMaxChars) : ackMaxChars;
+  if (stripHeartbeatToken(text, { mode: "heartbeat", maxAckChars: ackMaxChars }).shouldSkip) {
+    return true;
+  }
+  if (typeof parsedAckChars === "number" && Number.isFinite(parsedAckChars) && parsedAckChars <= 0) {
+    return false;
+  }
+  return stripHeartbeatToken(text, { mode: "message", maxAckChars: ackMaxChars }).didStrip;
+}
+
+export function isMemoryFlushUserMessage(
+  message: { role: string; content?: unknown },
+  memoryFlushPrompt?: string,
+): boolean {
+  if (message.role !== "user") {
+    return false;
+  }
+  const { text } = resolveMessageText(message.content);
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return false;
+  }
+  const normalizedPrompt = memoryFlushPrompt?.trim();
+  if (normalizedPrompt && trimmed.startsWith(normalizedPrompt)) {
+    return true;
+  }
+  return trimmed.startsWith(MEMORY_FLUSH_PROMPT_PREFIX) && trimmed.includes(MEMORY_FLUSH_ACK);
+}
+
+export function isNoReplyAckResponse(message: { role: string; content?: unknown }): boolean {
+  if (message.role !== "assistant") {
+    return false;
+  }
+  const { text, hasNonTextContent } = resolveMessageText(message.content);
+  if (hasNonTextContent) {
+    return false;
+  }
+  const trimmed = text.trim();
+  const normalized = trimmed.replace(/^[`*_~\s]+|[`*_~\s]+$/g, "");
+  if (normalized === MEMORY_FLUSH_ACK) {
+    return true;
+  }
+  return stripSilentToken(text, MEMORY_FLUSH_ACK) !== trimmed;
 }
 
 export function filterHeartbeatPairs<T extends { role: string; content?: unknown }>(
   messages: T[],
   ackMaxChars?: number,
   heartbeatPrompt?: string,
+  memoryFlushPrompt?: string,
 ): T[] {
   if (messages.length < 2) {
     return messages;
@@ -82,8 +129,10 @@ export function filterHeartbeatPairs<T extends { role: string; content?: unknown
   while (i < messages.length) {
     if (
       i + 1 < messages.length &&
-      isHeartbeatUserMessage(messages[i], heartbeatPrompt) &&
-      isHeartbeatOkResponse(messages[i + 1], ackMaxChars)
+      ((isHeartbeatUserMessage(messages[i], heartbeatPrompt) &&
+        isHeartbeatOkResponse(messages[i + 1], ackMaxChars)) ||
+        (isMemoryFlushUserMessage(messages[i], memoryFlushPrompt) &&
+          isNoReplyAckResponse(messages[i + 1])))
     ) {
       i += 2;
       continue;

@@ -75,6 +75,9 @@ import type { GatewayWsClient } from "./server/ws-types.js";
 
 type SubsystemLogger = ReturnType<typeof createSubsystemLogger>;
 
+export const GATEWAY_HTTP_REQUEST_CLAIMED = "__openclawGatewayHttpRequestClaimed";
+export const GATEWAY_HTTP_UPGRADE_CLAIMED = "__openclawGatewayHttpUpgradeClaimed";
+
 const HOOK_AUTH_FAILURE_LIMIT = 20;
 const HOOK_AUTH_FAILURE_WINDOW_MS = 60_000;
 
@@ -890,6 +893,16 @@ export function createGatewayHttpServer(opts: {
       });
 
   async function handleRequest(req: IncomingMessage, res: ServerResponse) {
+    if (
+      res.writableEnded ||
+      Boolean(
+        (req as IncomingMessage & { [GATEWAY_HTTP_REQUEST_CLAIMED]?: boolean })[
+          GATEWAY_HTTP_REQUEST_CLAIMED
+        ],
+      )
+    ) {
+      return;
+    }
     setDefaultSecurityHeaders(res, {
       strictTransportSecurity: strictTransportSecurityHeader,
     });
@@ -1155,6 +1168,15 @@ export function attachGatewayUpgradeHandler(opts: {
   } = opts;
   const getResolvedAuth = opts.getResolvedAuth ?? (() => resolvedAuth);
   httpServer.on("upgrade", (req, socket, head) => {
+    if (
+      Boolean(
+        (req as IncomingMessage & { [GATEWAY_HTTP_UPGRADE_CLAIMED]?: boolean })[
+          GATEWAY_HTTP_UPGRADE_CLAIMED
+        ],
+      )
+    ) {
+      return;
+    }
     void (async () => {
       const configSnapshot = loadConfig();
       const trustedProxies = configSnapshot.gateway?.trustedProxies ?? [];

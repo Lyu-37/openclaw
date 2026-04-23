@@ -3,6 +3,8 @@ import {
   filterHeartbeatPairs,
   isHeartbeatOkResponse,
   isHeartbeatUserMessage,
+  isMemoryFlushUserMessage,
+  isNoReplyAckResponse,
 } from "./heartbeat-filter.js";
 import { HEARTBEAT_PROMPT } from "./heartbeat.js";
 
@@ -59,6 +61,14 @@ describe("isHeartbeatOkResponse", () => {
         content: "You have 3 unread urgent emails. HEARTBEAT_OK",
       }),
     ).toBe(true);
+
+    expect(
+      isHeartbeatOkResponse({
+        role: "assistant",
+        content:
+          "Actually, let me reconsider. The conversation is live and carrying well, so there is nothing to send right now.\n\nHEARTBEAT_OK",
+      }),
+    ).toBe(true);
   });
 
   it("preserves meaningful or non-text responses", () => {
@@ -90,13 +100,55 @@ describe("isHeartbeatOkResponse", () => {
   });
 });
 
+describe("memory flush maintenance filtering", () => {
+  it("matches memory flush prompt and NO_REPLY ack", () => {
+    expect(
+      isMemoryFlushUserMessage({
+        role: "user",
+        content: "Pre-compaction memory flush.\nNO_REPLY",
+      }),
+    ).toBe(true);
+    expect(
+      isNoReplyAckResponse({
+        role: "assistant",
+        content: "**NO_REPLY**",
+      }),
+    ).toBe(true);
+    expect(
+      isNoReplyAckResponse({
+        role: "assistant",
+        content: "Stored a durable note.\n\nNO_REPLY",
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps ordinary chats that mention NO_REPLY", () => {
+    expect(
+      isMemoryFlushUserMessage({
+        role: "user",
+        content: "Please NO_REPLY if you cannot answer.",
+      }),
+    ).toBe(false);
+    expect(
+      isNoReplyAckResponse({
+        role: "assistant",
+        content: "Status NO_REPLY due to tool failure",
+      }),
+    ).toBe(false);
+  });
+});
+
 describe("filterHeartbeatPairs", () => {
   it("removes no-op heartbeat pairs", () => {
     const messages = [
       { role: "user", content: "Hello" },
       { role: "assistant", content: "Hi there!" },
       { role: "user", content: HEARTBEAT_PROMPT },
-      { role: "assistant", content: "HEARTBEAT_OK" },
+      {
+        role: "assistant",
+        content:
+          "Actually, let me reconsider. The thread is alive and there is no need for another opener.\n\nHEARTBEAT_OK",
+      },
       { role: "user", content: "What time is it?" },
       { role: "assistant", content: "It is 3pm." },
     ];
@@ -137,5 +189,23 @@ describe("filterHeartbeatPairs", () => {
     ];
 
     expect(filterHeartbeatPairs(messages, undefined, HEARTBEAT_PROMPT)).toEqual(messages);
+  });
+
+  it("removes no-op memory flush pairs", () => {
+    const messages = [
+      { role: "user", content: "Hello" },
+      { role: "assistant", content: "Hi there!" },
+      { role: "user", content: "Pre-compaction memory flush.\nNO_REPLY" },
+      { role: "assistant", content: "Stored a durable note.\n\nNO_REPLY" },
+      { role: "user", content: "What changed?" },
+      { role: "assistant", content: "The duplicate user replay is gone." },
+    ];
+
+    expect(filterHeartbeatPairs(messages, undefined, HEARTBEAT_PROMPT)).toEqual([
+      { role: "user", content: "Hello" },
+      { role: "assistant", content: "Hi there!" },
+      { role: "user", content: "What changed?" },
+      { role: "assistant", content: "The duplicate user replay is gone." },
+    ]);
   });
 });

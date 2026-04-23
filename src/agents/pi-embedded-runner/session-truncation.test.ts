@@ -4,7 +4,10 @@ import path from "node:path";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import { makeAgentAssistantMessage } from "../test-helpers/agent-message-fixtures.js";
-import { truncateSessionAfterCompaction } from "./session-truncation.js";
+import {
+  stripMaintenancePairsFromSession,
+  truncateSessionAfterCompaction,
+} from "./session-truncation.js";
 
 let tmpDir: string;
 
@@ -364,5 +367,67 @@ describe("truncateSessionAfterCompaction", () => {
     // Total entries should be less (main branch messages removed) but not zero
     expect(allAfter.length).toBeGreaterThan(0);
     expect(allAfter.length).toBeLessThan(entriesBefore.length);
+  });
+
+  it("strips active memory flush pairs with explanatory NO_REPLY tails", async () => {
+    const dir = await createTmpDir();
+    const sm = SessionManager.create(dir, dir);
+
+    sm.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+    sm.appendMessage(makeAssistant("hi", 2));
+    sm.appendMessage({ role: "user", content: "Pre-compaction memory flush.\nNO_REPLY", timestamp: 3 });
+    sm.appendMessage(makeAssistant("Stored a durable note.\n\nNO_REPLY", 4));
+    sm.appendMessage({ role: "user", content: "real question", timestamp: 5 });
+
+    const sessionFile = sm.getSessionFile()!;
+    const result = await stripMaintenancePairsFromSession({
+      sessionFile,
+      memoryFlushPrompt: "Pre-compaction memory flush.\nNO_REPLY",
+    });
+
+    expect(result.truncated).toBe(true);
+    expect(result.entriesRemoved).toBe(2);
+
+    const smAfter = SessionManager.open(sessionFile);
+    const branchAfter = smAfter.getBranch();
+    expect(branchAfter.map((entry) => entry.type)).toEqual(["message", "message", "message"]);
+
+    const serialized = JSON.stringify(smAfter.buildSessionContext().messages);
+    expect(serialized).not.toContain("Pre-compaction memory flush.");
+    expect(serialized).not.toContain("Stored a durable note.");
+    expect(serialized).toContain("real question");
+  });
+
+  it("strips stale dangling maintenance prompts and orphaned prompt errors", async () => {
+    const dir = await createTmpDir();
+    const sm = SessionManager.create(dir, dir);
+
+    sm.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+    sm.appendMessage(makeAssistant("hi", 2));
+    sm.appendCustomEntry("openclaw:prompt-error", {
+      runId: "memory-flush-timeout",
+      error: "This operation was aborted",
+    });
+    sm.appendMessage({ role: "user", content: "Pre-compaction memory flush.\nNO_REPLY", timestamp: 3 });
+    sm.appendMessage({ role: "user", content: "real question", timestamp: 120_000 });
+
+    const sessionFile = sm.getSessionFile()!;
+    const result = await stripMaintenancePairsFromSession({
+      sessionFile,
+      memoryFlushPrompt: "Pre-compaction memory flush.\nNO_REPLY",
+      nowMs: 180_000,
+    });
+
+    expect(result.truncated).toBe(true);
+    expect(result.entriesRemoved).toBe(2);
+
+    const smAfter = SessionManager.open(sessionFile);
+    const branchAfter = smAfter.getBranch();
+    expect(branchAfter.map((entry) => entry.type)).toEqual(["message", "message", "message"]);
+
+    const serialized = JSON.stringify(smAfter.getEntries());
+    expect(serialized).not.toContain("Pre-compaction memory flush.");
+    expect(serialized).not.toContain("openclaw:prompt-error");
+    expect(serialized).toContain("real question");
   });
 });

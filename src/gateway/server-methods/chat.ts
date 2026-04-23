@@ -52,6 +52,7 @@ import { MediaOffloadError } from "../chat-attachments.js";
 import { stripEnvelopeFromMessage, stripEnvelopeFromMessages } from "../chat-sanitize.js";
 import { augmentChatHistoryWithCliSessionImports } from "../cli-session-history.js";
 import { isSuppressedControlReplyText } from "../control-reply-text.js";
+import { sanitizeAssistantVisibleText } from "../assistant-visible-text.js";
 import { ADMIN_SCOPE } from "../method-scopes.js";
 import {
   GATEWAY_CLIENT_CAPS,
@@ -487,12 +488,14 @@ function buildChatSendTranscriptMessage(params: {
   message: string;
   savedImages: SavedMedia[];
   timestamp: number;
+  idempotencyKey?: string;
 }) {
   const mediaFields = resolveChatSendTranscriptMediaFields(params.savedImages);
   return {
     role: "user" as const,
     content: params.message,
     timestamp: params.timestamp,
+    ...(params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : {}),
     ...mediaFields,
   };
 }
@@ -633,7 +636,7 @@ function extractChatHistoryBlockText(message: unknown): string | undefined {
 
 function sanitizeChatHistoryContentBlock(
   block: unknown,
-  opts?: { preserveExactToolPayload?: boolean; maxChars?: number },
+  opts?: { preserveExactToolPayload?: boolean; maxChars?: number; sanitizeAssistantText?: boolean },
 ): { block: unknown; changed: boolean } {
   if (!block || typeof block !== "object") {
     return { block, changed: false };
@@ -649,9 +652,13 @@ function sanitizeChatHistoryContentBlock(
       entry.text = stripped.text;
       changed ||= stripped.changed;
     } else {
-      const res = truncateChatHistoryText(stripped.text, maxChars);
+      const visibleText =
+        opts?.sanitizeAssistantText === true
+          ? sanitizeAssistantVisibleText(stripped.text)
+          : stripped.text;
+      const res = truncateChatHistoryText(visibleText, maxChars);
       entry.text = res.text;
-      changed ||= stripped.changed || res.truncated;
+      changed ||= stripped.changed || visibleText !== stripped.text || res.truncated;
     }
   }
   if (typeof entry.content === "string") {
@@ -660,9 +667,13 @@ function sanitizeChatHistoryContentBlock(
       entry.content = stripped.text;
       changed ||= stripped.changed;
     } else {
-      const res = truncateChatHistoryText(stripped.text, maxChars);
+      const visibleText =
+        opts?.sanitizeAssistantText === true
+          ? sanitizeAssistantVisibleText(stripped.text)
+          : stripped.text;
+      const res = truncateChatHistoryText(visibleText, maxChars);
       entry.content = res.text;
-      changed ||= stripped.changed || res.truncated;
+      changed ||= stripped.changed || visibleText !== stripped.text || res.truncated;
     }
   }
   if (typeof entry.partialJson === "string") {
@@ -857,13 +868,19 @@ function sanitizeChatHistoryMessage(
       entry.content = stripped.text;
       changed ||= stripped.changed;
     } else {
-      const res = truncateChatHistoryText(stripped.text, maxChars);
+      const visibleText =
+        entry.role === "assistant" ? sanitizeAssistantVisibleText(stripped.text) : stripped.text;
+      const res = truncateChatHistoryText(visibleText, maxChars);
       entry.content = res.text;
-      changed ||= stripped.changed || res.truncated;
+      changed ||= stripped.changed || visibleText !== stripped.text || res.truncated;
     }
   } else if (Array.isArray(entry.content)) {
     const updated = entry.content.map((block) =>
-      sanitizeChatHistoryContentBlock(block, { preserveExactToolPayload, maxChars }),
+      sanitizeChatHistoryContentBlock(block, {
+        preserveExactToolPayload,
+        maxChars,
+        sanitizeAssistantText: entry.role === "assistant",
+      }),
     );
     if (updated.some((item) => item.changed)) {
       entry.content = updated.map((item) => item.block);
@@ -884,9 +901,11 @@ function sanitizeChatHistoryMessage(
       entry.text = stripped.text;
       changed ||= stripped.changed;
     } else {
-      const res = truncateChatHistoryText(stripped.text, maxChars);
+      const visibleText =
+        entry.role === "assistant" ? sanitizeAssistantVisibleText(stripped.text) : stripped.text;
+      const res = truncateChatHistoryText(visibleText, maxChars);
       entry.text = res.text;
-      changed ||= stripped.changed || res.truncated;
+      changed ||= stripped.changed || visibleText !== stripped.text || res.truncated;
     }
   }
 
@@ -2066,6 +2085,7 @@ export const chatHandlers: GatewayRequestHandlers = {
               message: parsedMessage,
               savedImages: persistedImages,
               timestamp: now,
+              idempotencyKey: clientRunId,
             }),
           });
         })();

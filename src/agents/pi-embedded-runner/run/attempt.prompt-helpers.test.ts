@@ -11,7 +11,10 @@ const videoGenerationTaskStatusMocks = vi.hoisted(() => ({
 vi.mock("../../music-generation-task-status.js", () => musicGenerationTaskStatusMocks);
 vi.mock("../../video-generation-task-status.js", () => videoGenerationTaskStatusMocks);
 
-import { resolveAttemptPrependSystemContext } from "./attempt.prompt-helpers.js";
+import {
+  resolveAttemptPrependSystemContext,
+  rewriteInternalUserMessageForTranscript,
+} from "./attempt.prompt-helpers.js";
 
 describe("resolveAttemptPrependSystemContext", () => {
   it("prepends active video task guidance ahead of hook system context", () => {
@@ -60,5 +63,46 @@ describe("resolveAttemptPrependSystemContext", () => {
       musicGenerationTaskStatusMocks.buildActiveMusicGenerationTaskPromptContextForSession,
     ).not.toHaveBeenCalled();
     expect(result).toBe("Hook system context");
+  });
+});
+
+describe("rewriteInternalUserMessageForTranscript", () => {
+  it("normalizes internal shared-session user turns to raw text plus idempotency key", () => {
+    const rewritten = rewriteInternalUserMessageForTranscript({
+      message: {
+        role: "user",
+        content:
+          'Sender (untrusted metadata):\n```json\n{"label":"OpenClaw UI"}\n```\n\n[Thu 2026-03-12 07:00 UTC] hello from unified api',
+      },
+      prompt:
+        'Sender (untrusted metadata):\n```json\n{"label":"OpenClaw UI"}\n```\n\n[Thu 2026-03-12 07:00 UTC] hello from unified api',
+      currentMessageId: "unified-http-send-1",
+      runId: "unified-http-send-1",
+      trigger: "user",
+    });
+
+    expect(rewritten).toEqual({
+      role: "user",
+      content: "hello from unified api",
+      idempotencyKey: "unified-http-send-1",
+    });
+  });
+
+  it("preserves external-channel transcript turns", () => {
+    const original = {
+      role: "user",
+      content:
+        'Sender (untrusted metadata):\n```json\n{"label":"Alice"}\n```\n\n[Thu 2026-03-12 07:00 UTC] hi',
+    };
+
+    expect(
+      rewriteInternalUserMessageForTranscript({
+        message: original,
+        prompt: String(original.content),
+        currentMessageId: "discord-msg-1",
+        runId: "run-1",
+        trigger: "user",
+      }),
+    ).toBe(original);
   });
 });

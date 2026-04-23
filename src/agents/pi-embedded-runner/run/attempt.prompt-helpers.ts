@@ -1,3 +1,4 @@
+import { stripInboundMetadata } from "../../../auto-reply/reply/strip-inbound-meta.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import type {
   ContextEnginePromptCacheInfo,
@@ -9,6 +10,7 @@ import type {
   PluginHookBeforePromptBuildResult,
 } from "../../../plugins/types.js";
 import { isCronSessionKey, isSubagentSessionKey } from "../../../routing/session-key.js";
+import { normalizeOptionalString } from "../../../shared/string-coerce.js";
 import { joinPresentTextSegments } from "../../../shared/text/join-segments.js";
 import { resolveHeartbeatPromptForSystemPrompt } from "../../heartbeat-system-prompt.js";
 import { buildActiveMusicGenerationTaskPromptContextForSession } from "../../music-generation-task-status.js";
@@ -139,6 +141,90 @@ function extractUserMessagePlainText(content: unknown): string | undefined {
     .join("\n")
     .trim();
   return text || undefined;
+}
+
+type TranscriptUserMessage = {
+  role: string;
+  content?: unknown;
+  text?: unknown;
+  idempotencyKey?: string;
+};
+
+export function rewriteInternalUserMessageForTranscript(params: {
+  message: TranscriptUserMessage;
+  prompt: string;
+  currentMessageId?: string | number;
+  runId: string;
+  trigger?: EmbeddedRunAttemptParams["trigger"];
+}): TranscriptUserMessage {
+  const messageId = normalizeOptionalString(params.currentMessageId);
+  if (params.trigger !== "user" || !messageId || messageId !== params.runId) {
+    return params.message;
+  }
+
+  const promptText = normalizeOptionalString(stripInboundMetadata(params.prompt));
+  const existingText = normalizeOptionalString(
+    stripInboundMetadata(
+      extractUserMessagePlainText(params.message.content) ??
+        (typeof params.message.text === "string" ? params.message.text : ""),
+    ),
+  );
+  const canonicalText = promptText ?? existingText;
+  let changed = params.message.idempotencyKey !== messageId;
+  const nextMessage: TranscriptUserMessage = {
+    ...params.message,
+    idempotencyKey: messageId,
+  };
+
+  if (typeof params.message.content === "string") {
+    if (canonicalText !== undefined && canonicalText !== params.message.content) {
+      nextMessage.content = canonicalText;
+      changed = true;
+    }
+  } else if (Array.isArray(params.message.content)) {
+    let sawTextBlock = false;
+    let insertedTextBlock = false;
+    const rewritten = params.message.content.flatMap((block) => {
+      if (typeof block !== "object" || block === null || !("type" in block)) {
+        return [block];
+      }
+      const textBlock = block as { type?: unknown; text?: unknown };
+      if (textBlock.type !== "text" || typeof textBlock.text !== "string") {
+        return [block];
+      }
+      sawTextBlock = true;
+      if (canonicalText === undefined) {
+        changed = true;
+        return [];
+      }
+      if (!insertedTextBlock) {
+        insertedTextBlock = true;
+        if (textBlock.text !== canonicalText) {
+          changed = true;
+          return [{ ...textBlock, text: canonicalText }];
+        }
+        return [block];
+      }
+      changed = true;
+      return [];
+    });
+    if (!sawTextBlock && canonicalText !== undefined) {
+      rewritten.unshift({ type: "text", text: canonicalText });
+      changed = true;
+    }
+    if (changed) {
+      nextMessage.content = rewritten;
+    }
+  }
+
+  if (typeof params.message.text === "string" && canonicalText !== undefined) {
+    if (params.message.text !== canonicalText) {
+      nextMessage.text = canonicalText;
+      changed = true;
+    }
+  }
+
+  return changed ? nextMessage : params.message;
 }
 
 export function mergeOrphanedTrailingUserPrompt(params: {

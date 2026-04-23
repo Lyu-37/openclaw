@@ -14,6 +14,7 @@ import {
   isSuppressedControlReplyLeadFragment,
   isSuppressedControlReplyText,
 } from "./control-reply-text.js";
+import { sanitizeAssistantVisibleText } from "./assistant-visible-text.js";
 import { loadGatewaySessionRow } from "./server-chat.load-gateway-session-row.runtime.js";
 import { persistGatewaySessionLifecycleEvent } from "./server-chat.persist-session-lifecycle.runtime.js";
 import { deriveGatewaySessionLifecycleSnapshot } from "./session-lifecycle-state.js";
@@ -712,11 +713,12 @@ export function createAgentEventHandler({
     const mergedText = startsWithSilentToken(mergedRawText, SILENT_REPLY_TOKEN)
       ? stripLeadingSilentToken(mergedRawText, SILENT_REPLY_TOKEN)
       : mergedRawText;
-    chatRunState.buffers.set(clientRunId, mergedText);
-    if (isSuppressedControlReplyText(mergedText)) {
+    const visibleText = sanitizeAssistantVisibleText(mergedText);
+    chatRunState.buffers.set(clientRunId, visibleText);
+    if (isSuppressedControlReplyText(visibleText)) {
       return;
     }
-    if (isSuppressedControlReplyLeadFragment(mergedText)) {
+    if (isSuppressedControlReplyLeadFragment(visibleText)) {
       return;
     }
     if (shouldHideHeartbeatChatOutput(clientRunId, sourceRunId)) {
@@ -728,7 +730,7 @@ export function createAgentEventHandler({
       return;
     }
     chatRunState.deltaSentAt.set(clientRunId, now);
-    chatRunState.deltaLastBroadcastLen.set(clientRunId, mergedText.length);
+    chatRunState.deltaLastBroadcastLen.set(clientRunId, visibleText.length);
     const payload = {
       runId: clientRunId,
       sessionKey,
@@ -736,7 +738,7 @@ export function createAgentEventHandler({
       state: "delta" as const,
       message: {
         role: "assistant",
-        content: [{ type: "text", text: mergedText }],
+        content: [{ type: "text", text: visibleText }],
         timestamp: now,
       },
     };
@@ -745,13 +747,13 @@ export function createAgentEventHandler({
   };
 
   const resolveBufferedChatTextState = (clientRunId: string, sourceRunId: string) => {
-    const bufferedText = stripInlineDirectiveTagsForDisplay(
-      chatRunState.buffers.get(clientRunId) ?? "",
-    ).text.trim();
+    const bufferedText = sanitizeAssistantVisibleText(
+      stripInlineDirectiveTagsForDisplay(chatRunState.buffers.get(clientRunId) ?? "").text,
+    );
     const normalizedHeartbeatText = normalizeHeartbeatChatFinalText({
       runId: clientRunId,
       sourceRunId,
-      text: bufferedText,
+      text: bufferedText.trim(),
     });
     const text = normalizedHeartbeatText.text.trim();
     const shouldSuppressSilent =

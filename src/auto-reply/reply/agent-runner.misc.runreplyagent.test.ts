@@ -289,6 +289,91 @@ describe("runReplyAgent auto-compaction token update", () => {
     // totalTokens should use lastCallUsage (55k), not accumulated (75k)
     expect(stored[sessionKey].totalTokens).toBe(55_000);
   });
+
+  it("returns the visible reply before background memory flush starts", async () => {
+    vi.useFakeTimers();
+    registerMemoryFlushPlanResolver(() => ({
+      softThresholdTokens: 4_000,
+      forceFlushTranscriptBytes: 1_000_000_000,
+      reserveTokensFloor: 20_000,
+      prompt: "Pre-compaction memory flush.\nNO_REPLY",
+      systemPrompt: "Write memory to memory/YYYY-MM-DD.md.",
+      relativePath: "memory/2023-11-14.md",
+    }));
+
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-postreply-flush-"));
+    const storePath = path.join(tmp, "sessions.json");
+    const sessionKey = "main";
+    const sessionEntry = {
+      sessionId: "session",
+      updatedAt: Date.now(),
+      totalTokens: 90_000,
+      totalTokensFresh: true,
+      compactionCount: 0,
+    };
+    await seedSessionStore({ storePath, sessionKey, entry: sessionEntry });
+
+    let resolveFlush: (() => void) | undefined;
+    const flushStarted = vi.fn();
+    runEmbeddedPiAgentMock
+      .mockImplementationOnce(async () => ({
+        payloads: [{ text: "reply first" }],
+        meta: {},
+      }))
+      .mockImplementationOnce(
+        async (params: { prompt?: string }) =>
+          await new Promise((resolve) => {
+            flushStarted(params.prompt);
+            resolveFlush = () => resolve({ payloads: [], meta: {} });
+          }),
+      );
+
+    const { typing, sessionCtx, resolvedQueue, followupRun } = createBaseRun({
+      storePath,
+      sessionEntry,
+      config: { agents: { defaults: { compaction: { memoryFlush: {} } } } },
+    });
+
+    const result = await runReplyAgent({
+      commandBody: "hello",
+      followupRun,
+      queueKey: "main",
+      resolvedQueue,
+      shouldSteer: false,
+      shouldFollowup: false,
+      isActive: false,
+      isStreaming: false,
+      typing,
+      sessionCtx,
+      sessionEntry,
+      sessionStore: { [sessionKey]: sessionEntry },
+      sessionKey,
+      storePath,
+      defaultModel: "anthropic/claude-opus-4-6",
+      agentCfgContextTokens: 100_000,
+      resolvedVerboseLevel: "off",
+      isNewSession: false,
+      blockStreamingEnabled: false,
+      resolvedBlockStreamingBreak: "message_end",
+      shouldInjectGroupIntro: false,
+      typingMode: "instant",
+    });
+
+    expect(result).toMatchObject({ text: "reply first" });
+    expect(runEmbeddedPiAgentMock).toHaveBeenCalledTimes(1);
+    expect(
+      (runEmbeddedPiAgentMock.mock.calls[0]?.[0] as { prompt?: string } | undefined)?.prompt,
+    ).toBe("hello");
+
+    await vi.runAllTimersAsync();
+    await vi.waitFor(() => {
+      expect(runEmbeddedPiAgentMock).toHaveBeenCalledTimes(2);
+    });
+
+    expect(flushStarted).toHaveBeenCalledWith(expect.stringContaining("Pre-compaction memory flush."));
+    resolveFlush?.();
+    await Promise.resolve();
+  });
 });
 
 describe("runReplyAgent block streaming", () => {

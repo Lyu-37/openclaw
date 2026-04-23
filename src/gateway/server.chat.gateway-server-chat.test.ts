@@ -819,6 +819,30 @@ describe("gateway server chat", () => {
     ]);
   });
 
+  test("chat.history strips prompt-leak preambles before visible assistant text", async () => {
+    const historyMessages = await loadChatHistoryWithMessages([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: [
+              "He wants to shift to lighter topics - what I do for fun.",
+              "Give a real-leaning answer, not a balanced list.",
+              "One concrete choice.",
+              "",
+              "NO_REPLY",
+              "刷短视频 看剧 偶尔跟室友出去吃个饭 就这些 你呢",
+            ].join("\n"),
+          },
+        ],
+        timestamp: 1,
+      },
+    ]);
+    const textValues = collectHistoryTextValues(historyMessages);
+    expect(textValues).toEqual(["刷短视频 看剧 偶尔跟室友出去吃个饭 就这些 你呢"]);
+  });
+
   test("chat.send does not persist verboseLevel for operator.write callers", async () => {
     await withGatewayServer(async ({ port }) => {
       await withMainSessionStore(async () => {

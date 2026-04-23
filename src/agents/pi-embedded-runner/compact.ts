@@ -22,6 +22,7 @@ import { resolveHeartbeatSummaryForAgent } from "../../infra/heartbeat-summary.j
 import { getMachineDisplayName } from "../../infra/machine-name.js";
 import { generateSecureToken } from "../../infra/secure-random.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
+import { resolveMemoryFlushPlan } from "../../plugins/memory-state.js";
 import type { ProviderRuntimeModel } from "../../plugins/provider-runtime-model.types.js";
 import {
   prepareProviderRuntimeAuth,
@@ -1136,6 +1137,7 @@ export async function compactEmbeddedPiSessionDirect(
                 sessionFile: params.sessionFile,
                 ackMaxChars: heartbeatSummary.ackMaxChars,
                 heartbeatPrompt: heartbeatSummary.prompt,
+                memoryFlushPrompt: resolveMemoryFlushPlan({ cfg: params.config })?.prompt,
               });
               if (truncResult.truncated) {
                 log.info(

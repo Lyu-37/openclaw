@@ -370,6 +370,50 @@ describe("agent event handler", () => {
     nowSpy?.mockRestore();
   });
 
+  it("strips prompt-leak preambles once a NO_REPLY control line is followed by visible text", () => {
+    const { broadcast, nodeSendToSession, chatRunState, handler, nowSpy } = createHarness({
+      now: 2_260,
+    });
+    chatRunState.registry.add("run-4c", { sessionKey: "session-4c", clientRunId: "client-4c" });
+
+    handler({
+      runId: "run-4c",
+      seq: 1,
+      stream: "assistant",
+      ts: Date.now(),
+      data: {
+        text: [
+          "He wants to shift to lighter topics - what I do for fun.",
+          "Give a real-leaning answer, not a balanced list.",
+          "One concrete choice.",
+          "",
+          "NO_REPLY",
+          "刷短视频 看剧 偶尔跟室友出去吃个饭 就这些 你呢",
+        ].join("\n"),
+      },
+    });
+    emitLifecycleEnd(handler, "run-4c");
+
+    const chatCalls = chatBroadcastCalls(broadcast);
+    const finalPayload = chatCalls.at(-1)?.[1] as {
+      message?: { content?: Array<{ text?: string }> };
+      state?: string;
+    };
+    expect(finalPayload.state).toBe("final");
+    expect(finalPayload.message?.content?.[0]?.text).toBe(
+      "刷短视频 看剧 偶尔跟室友出去吃个饭 就这些 你呢",
+    );
+    expect(
+      chatCalls.every(([, payload]) => {
+        const text = (payload as { message?: { content?: Array<{ text?: string }> } }).message
+          ?.content?.[0]?.text;
+        return !text || (!text.includes("NO_REPLY") && !text.includes("He wants to shift"));
+      }),
+    ).toBe(true);
+    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(chatCalls.length);
+    nowSpy?.mockRestore();
+  });
+
   it("flushes buffered text as delta before final when throttle suppresses the latest chunk", () => {
     let now = 10_000;
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);

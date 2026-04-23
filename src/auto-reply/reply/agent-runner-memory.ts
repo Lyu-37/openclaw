@@ -33,6 +33,7 @@ import {
   buildEmbeddedRunExecutionParams,
   resolveModelFallbackOptions,
 } from "./agent-runner-utils.js";
+import { stripMaintenancePairsFromSession } from "../../agents/pi-embedded-runner/session-truncation.js";
 import {
   hasAlreadyFlushedForCurrentCompaction,
   resolveMemoryFlushContextWindowTokens,
@@ -851,6 +852,24 @@ export async function runMemoryFlushIfNeeded(params: {
     }
   } catch (err) {
     logVerbose(`memory flush run failed: ${String(err)}`);
+  }
+
+  const sessionFileForCleanup =
+    activeSessionEntry?.sessionFile ?? params.followupRun.run.sessionFile;
+  if (sessionFileForCleanup) {
+    try {
+      const stripResult = await stripMaintenancePairsFromSession({
+        sessionFile: sessionFileForCleanup,
+        memoryFlushPrompt: activeMemoryFlushPlan.prompt,
+      });
+      if (stripResult.truncated) {
+        logVerbose(
+          `memory flush transcript cleanup removed ${stripResult.entriesRemoved} entries from ${sessionFileForCleanup}`,
+        );
+      }
+    } catch (err) {
+      logVerbose(`memory flush transcript cleanup failed: ${String(err)}`);
+    }
   }
 
   return activeSessionEntry;

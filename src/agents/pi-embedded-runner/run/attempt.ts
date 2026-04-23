@@ -14,6 +14,7 @@ import { resolveHeartbeatSummaryForAgent } from "../../../infra/heartbeat-summar
 import { getMachineDisplayName } from "../../../infra/machine-name.js";
 import { MAX_IMAGE_BYTES } from "../../../media/constants.js";
 import { getGlobalHookRunner } from "../../../plugins/hook-runner-global.js";
+import { resolveMemoryFlushPlan } from "../../../plugins/memory-state.js";
 import { resolveToolCallArgumentsEncoding } from "../../../plugins/provider-model-compat.js";
 import {
   resolveProviderSystemPromptContribution,
@@ -204,6 +205,7 @@ import {
   resolveAttemptPrependSystemContext,
   resolvePromptBuildHookResult,
   resolvePromptModeForSession,
+  rewriteInternalUserMessageForTranscript,
   shouldWarnOnOrphanedUserRepair,
   shouldInjectHeartbeatPrompt,
 } from "./attempt.prompt-helpers.js";
@@ -1127,6 +1129,33 @@ export async function runEmbeddedAttempt(
       }
       const activeSession = session;
       let prePromptMessageCount = activeSession.messages.length;
+      const internalUserTurnRewriteUnsubscribe =
+        params.trigger === "user" &&
+        normalizeOptionalString(params.currentMessageId) === params.runId
+          ? (() => {
+              let normalizedPrimaryUserTurn = false;
+              return activeSession.subscribe((event) => {
+                if (
+                  normalizedPrimaryUserTurn ||
+                  event.type !== "message_end" ||
+                  event.message.role !== "user"
+                ) {
+                  return;
+                }
+                normalizedPrimaryUserTurn = true;
+                Object.assign(
+                  event.message,
+                  rewriteInternalUserMessageForTranscript({
+                    message: event.message,
+                    prompt: params.prompt,
+                    currentMessageId: params.currentMessageId,
+                    runId: params.runId,
+                    trigger: params.trigger,
+                  }),
+                );
+              });
+            })()
+          : undefined;
       abortSessionForYield = () => {
         yieldAbortSettled = Promise.resolve(activeSession.abort());
       };
@@ -1501,10 +1530,12 @@ export async function runEmbeddedAttempt(
           params.config && sessionAgentId
             ? resolveHeartbeatSummaryForAgent(params.config, sessionAgentId)
             : undefined;
+        const memoryFlushPrompt = resolveMemoryFlushPlan({ cfg: params.config })?.prompt;
         const heartbeatFiltered = filterHeartbeatPairs(
           validated,
           heartbeatSummary?.ackMaxChars,
           heartbeatSummary?.prompt,
+          memoryFlushPrompt,
         );
         const truncated = limitHistoryTurns(
           heartbeatFiltered,
@@ -1981,6 +2012,8 @@ export async function runEmbeddedAttempt(
           params.config && sessionAgentId
             ? resolveHeartbeatSummaryForAgent(params.config, sessionAgentId)
             : undefined;
+        const memoryFlushPrompt =
+          params.config ? resolveMemoryFlushPlan({ cfg: params.config })?.prompt : undefined;
 
         try {
           // Idempotent cleanup: prune old image blocks to limit context
@@ -1995,6 +2028,7 @@ export async function runEmbeddedAttempt(
             activeSession.messages,
             heartbeatSummary?.ackMaxChars,
             heartbeatSummary?.prompt,
+            memoryFlushPrompt,
           );
           if (filteredMessages.length < activeSession.messages.length) {
             activeSession.agent.state.messages = filteredMessages;
@@ -2474,6 +2508,13 @@ export async function runEmbeddedAttempt(
         if (!isProbeSession && (aborted || timedOut) && !timedOutDuringCompaction) {
           log.debug(
             `run cleanup: runId=${params.runId} sessionId=${params.sessionId} aborted=${aborted} timedOut=${timedOut}`,
+          );
+        }
+        try {
+          internalUserTurnRewriteUnsubscribe?.();
+        } catch (err) {
+          log.error(
+            `CRITICAL: internal user transcript unsubscribe failed: runId=${params.runId} ${String(err)}`,
           );
         }
         try {

@@ -5,6 +5,7 @@ import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
 import { resolveModelAuthMode } from "../../agents/model-auth.js";
 import { isCliProvider } from "../../agents/model-selection.js";
 import { queueEmbeddedPiMessage } from "../../agents/pi-embedded-runner/runs.js";
+import { stripMaintenancePairsFromSession } from "../../agents/pi-embedded-runner/session-truncation.js";
 import { hasNonzeroUsage, normalizeUsage } from "../../agents/usage.js";
 import {
   loadSessionStore,
@@ -17,7 +18,9 @@ import type { TypingMode } from "../../config/types.js";
 import { resolveSessionTranscriptCandidates } from "../../gateway/session-utils.fs.js";
 import { emitAgentEvent } from "../../infra/agent-events.js";
 import { emitDiagnosticEvent, isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
+import { resolveHeartbeatSummaryForAgent } from "../../infra/heartbeat-summary.js";
 import { enqueueSystemEvent } from "../../infra/system-events.js";
+import { resolveMemoryFlushPlan } from "../../plugins/memory-state.js";
 import { CommandLaneClearedError, GatewayDrainingError } from "../../process/command-queue.js";
 import { normalizeOptionalString } from "../../shared/string-coerce.js";
 import {
@@ -77,6 +80,37 @@ import { createTypingSignaler } from "./typing-mode.js";
 import type { TypingController } from "./typing.js";
 
 const BLOCK_REPLY_SEND_TIMEOUT_MS = 15_000;
+
+function schedulePostReplyMemoryFlush(
+  params: Parameters<typeof runMemoryFlushIfNeeded>[0],
+): void {
+  const timer = setTimeout(() => {
+    void runMemoryFlushIfNeeded(params).catch(() => undefined);
+  }, 0);
+  timer.unref?.();
+}
+
+function schedulePostReplyMaintenanceStrip(params: {
+  cfg: Parameters<typeof resolveHeartbeatSummaryForAgent>[0];
+  agentId?: string;
+  sessionFile?: string;
+}): void {
+  const sessionFile = normalizeOptionalString(params.sessionFile);
+  if (!sessionFile) {
+    return;
+  }
+  const heartbeatSummary = resolveHeartbeatSummaryForAgent(params.cfg, params.agentId);
+  const memoryFlushPrompt = resolveMemoryFlushPlan({ cfg: params.cfg })?.prompt;
+  const timer = setTimeout(() => {
+    void stripMaintenancePairsFromSession({
+      sessionFile,
+      ackMaxChars: heartbeatSummary.ackMaxChars,
+      heartbeatPrompt: heartbeatSummary.prompt,
+      memoryFlushPrompt,
+    }).catch(() => undefined);
+  }, 0);
+  timer.unref?.();
+}
 
 function buildInlinePluginStatusPayload(params: {
   entry: SessionEntry | undefined;
@@ -1112,23 +1146,6 @@ export async function runReplyAgent(params: {
     preflightCompactionApplied =
       (activeSessionEntry?.compactionCount ?? 0) > prePreflightCompactionCount;
 
-    activeSessionEntry = await runMemoryFlushIfNeeded({
-      cfg,
-      followupRun,
-      promptForEstimate: followupRun.prompt,
-      sessionCtx,
-      opts,
-      defaultModel,
-      agentCfgContextTokens,
-      resolvedVerboseLevel,
-      sessionEntry: activeSessionEntry,
-      sessionStore: activeSessionStore,
-      sessionKey,
-      storePath,
-      isHeartbeat,
-      replyOperation,
-    });
-
     runFollowupTurn = createFollowupRunner({
       opts,
       typing,
@@ -1335,6 +1352,27 @@ export async function runReplyAgent(params: {
       cliSessionId,
       cliSessionBinding,
       usageIsContextSnapshot: isCliProvider(providerUsed, cfg),
+    });
+    schedulePostReplyMaintenanceStrip({
+      cfg,
+      agentId: followupRun.run.agentId,
+      sessionFile: activeSessionEntry?.sessionFile ?? followupRun.run.sessionFile,
+    });
+    schedulePostReplyMemoryFlush({
+      cfg,
+      followupRun,
+      promptForEstimate: followupRun.prompt,
+      sessionCtx,
+      opts,
+      defaultModel,
+      agentCfgContextTokens,
+      resolvedVerboseLevel,
+      sessionEntry: activeSessionEntry,
+      sessionStore: activeSessionStore,
+      sessionKey,
+      storePath,
+      isHeartbeat,
+      replyOperation,
     });
 
     // Drain any late tool/block deliveries before deciding there's "nothing to send".

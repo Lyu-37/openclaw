@@ -65,6 +65,7 @@ import {
 import { createGatewayRuntimeState } from "./server-runtime-state.js";
 import { startGatewayEventSubscriptions } from "./server-runtime-subscriptions.js";
 import { resolveSessionKeyForRun } from "./server-session-key.js";
+import { attachUnifiedChatApi } from "./unified-chat-api.js";
 import {
   enforceSharedGatewaySessionGenerationForConfigWrite,
   getRequiredSharedGatewaySessionGeneration,
@@ -799,6 +800,15 @@ export async function startGatewayServer(
       extraHandlers: { ...pluginRegistry.gatewayHandlers, ...extraHandlers },
       broadcast,
       context: gatewayRequestContext,
+    });
+    attachUnifiedChatApi({
+      httpServers,
+      clients,
+      context: gatewayRequestContext,
+      resolvedAuth,
+      getResolvedAuth,
+      rateLimiter: authRateLimiter,
+      log,
     });
     await startListening();
     startupTrace.mark("http.bound");
