@@ -44,4 +44,20 @@ describe("applyBootstrapHookOverrides", () => {
     expect(updated).toHaveLength(2);
     expect(updated[1]?.path).toBe("/tmp/EXTRA.md");
   });
+
+  it("passes the current user text through bootstrap hook context", async () => {
+    let seenText = "";
+    registerInternalHook("agent:bootstrap", (event) => {
+      const context = event.context as AgentBootstrapHookContext;
+      seenText = context.currentUserText ?? "";
+    });
+
+    await applyBootstrapHookOverrides({
+      files: [makeFile()],
+      workspaceDir: "/tmp",
+      currentUserText: "那你自己说点什么",
+    });
+
+    expect(seenText).toBe("那你自己说点什么");
+  });
 });

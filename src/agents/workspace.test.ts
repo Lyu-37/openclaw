@@ -10,6 +10,8 @@ import {
   DEFAULT_IDENTITY_FILENAME,
   DEFAULT_MEMORY_ALT_FILENAME,
   DEFAULT_MEMORY_FILENAME,
+  DEFAULT_ONLINE_FILENAME,
+  DEFAULT_STATE_FILENAME,
   DEFAULT_TOOLS_FILENAME,
   DEFAULT_USER_FILENAME,
   ensureAgentWorkspace,
@@ -65,7 +67,9 @@ async function expectCompletedWithoutBootstrap(dir: string) {
 function expectSubagentAllowedBootstrapNames(files: WorkspaceBootstrapFile[]) {
   const names = files.map((file) => file.name);
   expect(names).toContain("AGENTS.md");
+  expect(names).toContain("STATE.md");
   expect(names).toContain("TOOLS.md");
+  expect(names).toContain("ONLINE.md");
   expect(names).toContain("SOUL.md");
   expect(names).toContain("IDENTITY.md");
   expect(names).toContain("USER.md");
@@ -236,6 +240,32 @@ describe("loadWorkspaceBootstrapFiles", () => {
     expectSingleMemoryEntry(files, "memory");
   });
 
+  it("includes ONLINE.md when present", async () => {
+    const tempDir = await makeTempWorkspace("openclaw-workspace-");
+    await writeWorkspaceFile({ dir: tempDir, name: DEFAULT_ONLINE_FILENAME, content: "web rules" });
+
+    const files = await loadWorkspaceBootstrapFiles(tempDir);
+    const online = files.find((file) => file.name === DEFAULT_ONLINE_FILENAME);
+    expect(online).toMatchObject({
+      name: DEFAULT_ONLINE_FILENAME,
+      content: "web rules",
+      missing: false,
+    });
+  });
+
+  it("includes STATE.md when present", async () => {
+    const tempDir = await makeTempWorkspace("openclaw-workspace-");
+    await writeWorkspaceFile({ dir: tempDir, name: DEFAULT_STATE_FILENAME, content: "state rules" });
+
+    const files = await loadWorkspaceBootstrapFiles(tempDir);
+    const state = files.find((file) => file.name === DEFAULT_STATE_FILENAME);
+    expect(state).toMatchObject({
+      name: DEFAULT_STATE_FILENAME,
+      content: "state rules",
+      missing: false,
+    });
+  });
+
   it("includes memory.md when MEMORY.md is absent", async () => {
     const tempDir = await makeTempWorkspace("openclaw-workspace-");
     await writeWorkspaceFile({ dir: tempDir, name: "memory.md", content: "alt" });
@@ -287,7 +317,9 @@ describe("filterBootstrapFilesForSession", () => {
   const mockFiles: WorkspaceBootstrapFile[] = [
     { name: "AGENTS.md", path: "/w/AGENTS.md", content: "", missing: false },
     { name: "SOUL.md", path: "/w/SOUL.md", content: "", missing: false },
+    { name: "STATE.md", path: "/w/STATE.md", content: "", missing: false },
     { name: "TOOLS.md", path: "/w/TOOLS.md", content: "", missing: false },
+    { name: "ONLINE.md", path: "/w/ONLINE.md", content: "", missing: false },
     { name: "IDENTITY.md", path: "/w/IDENTITY.md", content: "", missing: false },
     { name: "USER.md", path: "/w/USER.md", content: "", missing: false },
     { name: "HEARTBEAT.md", path: "/w/HEARTBEAT.md", content: "", missing: false },

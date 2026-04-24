@@ -118,6 +118,7 @@ export async function prepareCliRunContext(
     config: params.config,
     sessionKey: params.sessionKey,
     sessionId: params.sessionId,
+    currentUserText: params.prompt,
     warn: prepareDeps.makeBootstrapWarn({
       sessionLabel,
       workspaceDir,

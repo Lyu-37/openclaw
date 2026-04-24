@@ -583,6 +583,7 @@ export async function runEmbeddedAttempt(
           config: params.config,
           sessionKey: params.sessionKey,
           sessionId: params.sessionId,
+          currentUserText: params.prompt,
           warn: makeBootstrapWarn({
             sessionLabel,
             workspaceDir: resolvedWorkspace,

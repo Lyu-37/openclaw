@@ -588,6 +588,29 @@ describe("buildAgentSystemPrompt", () => {
     expect(prompt).toContain("Bravo");
   });
 
+  it("orders STATE.md and ONLINE.md with the core persona context before BOOTSTRAP.md", () => {
+    const prompt = buildAgentSystemPrompt({
+      workspaceDir: "/tmp/openclaw",
+      contextFiles: [
+        { path: "BOOTSTRAP.md", content: "Bootstrap" },
+        { path: "STATE.md", content: "State" },
+        { path: "ONLINE.md", content: "Online" },
+        { path: "TOOLS.md", content: "Tools" },
+      ],
+    });
+
+    const toolsIndex = prompt.indexOf("## TOOLS.md");
+    const stateIndex = prompt.indexOf("## STATE.md");
+    const onlineIndex = prompt.indexOf("## ONLINE.md");
+    const bootstrapIndex = prompt.indexOf("## BOOTSTRAP.md");
+
+    expect(toolsIndex).toBeGreaterThanOrEqual(0);
+    expect(stateIndex).toBeGreaterThanOrEqual(0);
+    expect(stateIndex).toBeLessThan(toolsIndex);
+    expect(onlineIndex).toBeGreaterThan(toolsIndex);
+    expect(bootstrapIndex).toBeGreaterThan(onlineIndex);
+  });
+
   it("ignores context files with missing or blank paths", () => {
     const prompt = buildAgentSystemPrompt({
       workspaceDir: "/tmp/openclaw",
