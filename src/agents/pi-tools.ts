@@ -146,7 +146,11 @@ function pathNormalizeForCompare(value: string) {
 }
 
 function isHeartbeatMaintenanceRun(options?: { sessionKey?: string; trigger?: string }) {
-  return options?.sessionKey === "heartbeat" || options?.trigger === "heartbeat";
+  if (options?.trigger === "heartbeat") {
+    return true;
+  }
+  const sessionKey = options?.sessionKey?.trim().toLowerCase();
+  return sessionKey === "heartbeat" || sessionKey?.endsWith(":heartbeat") === true;
 }
 
 function wrapToolHeartbeatStateWriteGuard(
@@ -447,24 +451,46 @@ export function createOpenClawCodingTools(options?: {
     ...(providerProfileAlsoAllow ?? []),
     ...runtimeProfileAlsoAllow,
   ]);
-  // Prefer sessionKey for process isolation scope to prevent cross-session process visibility/killing.
-  // Fallback to agentId if no sessionKey is available (e.g. legacy or global contexts).
-  const scopeKey =
-    options?.exec?.scopeKey ?? options?.sessionKey ?? (agentId ? `agent:${agentId}` : undefined);
+  const globalPolicyWithRuntimeAlsoAllow = mergeAlsoAllowPolicy(
+    globalPolicy,
+    runtimeProfileAlsoAllow,
+  );
+  const globalProviderPolicyWithRuntimeAlsoAllow = mergeAlsoAllowPolicy(
+    globalProviderPolicy,
+    runtimeProfileAlsoAllow,
+  );
+  const agentPolicyWithRuntimeAlsoAllow = mergeAlsoAllowPolicy(agentPolicy, runtimeProfileAlsoAllow);
+  const agentProviderPolicyWithRuntimeAlsoAllow = mergeAlsoAllowPolicy(
+    agentProviderPolicy,
+    runtimeProfileAlsoAllow,
+  );
+  const groupPolicyWithRuntimeAlsoAllow = mergeAlsoAllowPolicy(groupPolicy, runtimeProfileAlsoAllow);
   const subagentPolicy =
     isSubagentSessionKey(options?.sessionKey) && options?.sessionKey
       ? resolveSubagentToolPolicyForSession(options.config, options.sessionKey)
       : undefined;
+  const sandboxToolPolicyWithRuntimeAlsoAllow = mergeAlsoAllowPolicy(
+    sandboxToolPolicy,
+    runtimeProfileAlsoAllow,
+  );
+  const subagentPolicyWithRuntimeAlsoAllow = mergeAlsoAllowPolicy(
+    subagentPolicy,
+    runtimeProfileAlsoAllow,
+  );
+  // Prefer sessionKey for process isolation scope to prevent cross-session process visibility/killing.
+  // Fallback to agentId if no sessionKey is available (e.g. legacy or global contexts).
+  const scopeKey =
+    options?.exec?.scopeKey ?? options?.sessionKey ?? (agentId ? `agent:${agentId}` : undefined);
   const allowBackground = isToolAllowedByPolicies("process", [
     profilePolicyWithAlsoAllow,
     providerProfilePolicyWithAlsoAllow,
-    globalPolicy,
-    globalProviderPolicy,
-    agentPolicy,
-    agentProviderPolicy,
-    groupPolicy,
-    sandboxToolPolicy,
-    subagentPolicy,
+    globalPolicyWithRuntimeAlsoAllow,
+    globalProviderPolicyWithRuntimeAlsoAllow,
+    agentPolicyWithRuntimeAlsoAllow,
+    agentProviderPolicyWithRuntimeAlsoAllow,
+    groupPolicyWithRuntimeAlsoAllow,
+    sandboxToolPolicyWithRuntimeAlsoAllow,
+    subagentPolicyWithRuntimeAlsoAllow,
   ]);
   const execConfig = resolveExecConfig({ cfg: options?.config, agentId });
   const fsConfig = resolveToolFsConfig({ cfg: options?.config, agentId });
@@ -650,13 +676,13 @@ export function createOpenClawCodingTools(options?: {
       pluginToolAllowlist: collectExplicitAllowlist([
         profilePolicy,
         providerProfilePolicy,
-        globalPolicy,
-        globalProviderPolicy,
-        agentPolicy,
-        agentProviderPolicy,
-        groupPolicy,
-        sandboxToolPolicy,
-        subagentPolicy,
+        globalPolicyWithRuntimeAlsoAllow,
+        globalProviderPolicyWithRuntimeAlsoAllow,
+        agentPolicyWithRuntimeAlsoAllow,
+        agentProviderPolicyWithRuntimeAlsoAllow,
+        groupPolicyWithRuntimeAlsoAllow,
+        sandboxToolPolicyWithRuntimeAlsoAllow,
+        subagentPolicyWithRuntimeAlsoAllow,
       ]),
       currentChannelId: options?.currentChannelId,
       currentThreadTs: options?.currentThreadTs,
@@ -741,15 +767,15 @@ export function createOpenClawCodingTools(options?: {
         providerProfilePolicy: providerProfilePolicyWithAlsoAllow,
         providerProfile,
         providerProfileUnavailableCoreWarningAllowlist: providerProfilePolicy?.allow,
-        globalPolicy,
-        globalProviderPolicy,
-        agentPolicy,
-        agentProviderPolicy,
-        groupPolicy,
+        globalPolicy: globalPolicyWithRuntimeAlsoAllow,
+        globalProviderPolicy: globalProviderPolicyWithRuntimeAlsoAllow,
+        agentPolicy: agentPolicyWithRuntimeAlsoAllow,
+        agentProviderPolicy: agentProviderPolicyWithRuntimeAlsoAllow,
+        groupPolicy: groupPolicyWithRuntimeAlsoAllow,
         agentId,
       }),
-      { policy: sandboxToolPolicy, label: "sandbox tools.allow" },
-      { policy: subagentPolicy, label: "subagent tools.allow" },
+      { policy: sandboxToolPolicyWithRuntimeAlsoAllow, label: "sandbox tools.allow" },
+      { policy: subagentPolicyWithRuntimeAlsoAllow, label: "subagent tools.allow" },
     ],
   });
   // Always normalize tool JSON Schemas before handing them to pi-agent/pi-ai.

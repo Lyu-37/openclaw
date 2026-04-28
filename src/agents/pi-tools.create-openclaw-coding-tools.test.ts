@@ -168,6 +168,44 @@ describe("createOpenClawCodingTools", () => {
       expect(heartbeatNames.has("exec")).toBe(false);
       expect(heartbeatNames.has("process")).toBe(false);
 
+      const resolvedKeyTools = createOpenClawCodingTools({
+        sessionKey: "agent:main:main:heartbeat",
+        workspaceDir: tmpDir,
+        modelProvider: "openai",
+        modelId: "gpt-5.4",
+      });
+      const resolvedKeyNames = new Set(resolvedKeyTools.map((tool) => tool.name));
+      expect(resolvedKeyNames.has("emit_drift_proposal")).toBe(true);
+      expect(resolvedKeyNames.has("exec")).toBe(false);
+      expect(resolvedKeyNames.has("process")).toBe(false);
+
+      const webOnlyConfig: OpenClawConfig = {
+        tools: { allow: ["web_search", "web_fetch", "browser"] },
+      };
+      const allowlistedHeartbeatTools = createOpenClawCodingTools({
+        config: webOnlyConfig,
+        sessionKey: "agent:main:main:heartbeat",
+        workspaceDir: tmpDir,
+        modelProvider: "openai",
+        modelId: "gpt-5.4",
+      });
+      const allowlistedHeartbeatNames = new Set(
+        allowlistedHeartbeatTools.map((tool) => tool.name),
+      );
+      expect(allowlistedHeartbeatNames.has("emit_drift_proposal")).toBe(true);
+      expect(allowlistedHeartbeatNames.has("exec")).toBe(false);
+      expect(allowlistedHeartbeatNames.has("process")).toBe(false);
+
+      const allowlistedMainTools = createOpenClawCodingTools({
+        config: webOnlyConfig,
+        sessionKey: "agent:main:main",
+        workspaceDir: tmpDir,
+        modelProvider: "openai",
+        modelId: "gpt-5.4",
+      });
+      const allowlistedMainNames = new Set(allowlistedMainTools.map((tool) => tool.name));
+      expect(allowlistedMainNames.has("emit_drift_proposal")).toBe(false);
+
       const writeTool = tools.find((tool) => tool.name === "write");
       const editTool = tools.find((tool) => tool.name === "edit");
       const proposalTool = tools.find((tool) => tool.name === "emit_drift_proposal");
