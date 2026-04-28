@@ -1,3 +1,4 @@
+import path from "node:path";
 import { codingTools, createReadTool, readTool } from "@mariozechner/pi-coding-agent";
 import type { ModelCompatConfig } from "../config/types.models.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -19,6 +20,7 @@ import type { ProcessToolDefaults } from "./bash-tools.process.js";
 import { execSchema, processSchema } from "./bash-tools.schemas.js";
 import { listChannelAgentTools } from "./channel-tools.js";
 import { shouldSuppressManagedWebSearchTool } from "./codex-native-web-search.js";
+import { createHeartbeatDriftProposalTool } from "./heartbeat-drift-proposal-tool.js";
 import { resolveImageSanitizationLimits } from "./image-sanitization.js";
 import type { ModelAuthMode } from "./model-auth.js";
 import { createOpenClawTools } from "./openclaw-tools.js";
@@ -41,6 +43,7 @@ import {
   createSandboxedReadTool,
   createSandboxedWriteTool,
   getToolParamsRecord,
+  resolveToolPathAgainstWorkspaceRoot,
   wrapToolMemoryFlushAppendOnlyWrite,
   wrapToolWorkspaceRootGuard,
   wrapToolWorkspaceRootGuardWithOptions,
@@ -72,6 +75,8 @@ function isOpenAIProvider(provider?: string) {
 }
 
 const MEMORY_FLUSH_ALLOWED_TOOL_NAMES = new Set(["read", "write"]);
+const HEARTBEAT_DISABLED_TOOL_NAMES = new Set(["apply_patch", "exec", "process"]);
+const HEARTBEAT_STATE_FILE_NAME = "STATE.md";
 
 type BashToolsModule = typeof import("./bash-tools.js");
 
@@ -127,6 +132,53 @@ function createLazyProcessTool(defaults?: ProcessToolDefaults): AnyAgentTool {
     execute: async (...args: Parameters<AnyAgentTool["execute"]>) =>
       (await loadTool()).execute(...args),
   } as AnyAgentTool;
+}
+
+function sameFilesystemPath(left: string, right: string) {
+  const normalizedLeft = pathNormalizeForCompare(left);
+  const normalizedRight = pathNormalizeForCompare(right);
+  return normalizedLeft === normalizedRight;
+}
+
+function pathNormalizeForCompare(value: string) {
+  const normalized = value.replace(/\\/g, "/").replace(/\/+$/, "");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function isHeartbeatMaintenanceRun(options?: { sessionKey?: string; trigger?: string }) {
+  return options?.sessionKey === "heartbeat" || options?.trigger === "heartbeat";
+}
+
+function wrapToolHeartbeatStateWriteGuard(
+  tool: AnyAgentTool,
+  options: {
+    root: string;
+    containerWorkdir?: string;
+  },
+): AnyAgentTool {
+  const statePath = path.resolve(options.root, HEARTBEAT_STATE_FILE_NAME);
+  return {
+    ...tool,
+    description: `${tool.description} During HEARTBEAT maintenance, do not mutate STATE.md directly; use emit_drift_proposal instead.`,
+    execute: async (toolCallId, args, signal, onUpdate) => {
+      const record = getToolParamsRecord(args);
+      const filePath =
+        typeof record?.path === "string" && record.path.trim() ? record.path : undefined;
+      if (filePath) {
+        const resolvedPath = resolveToolPathAgainstWorkspaceRoot({
+          filePath,
+          root: options.root,
+          containerWorkdir: options.containerWorkdir,
+        });
+        if (sameFilesystemPath(resolvedPath, statePath)) {
+          throw new Error(
+            "HEARTBEAT maintenance cannot mutate STATE.md directly; use emit_drift_proposal.",
+          );
+        }
+      }
+      return tool.execute(toolCallId, args, signal, onUpdate);
+    },
+  };
 }
 
 function applyModelProviderToolPolicy(
@@ -340,6 +392,7 @@ export function createOpenClawCodingTools(options?: {
   const execToolName = "exec";
   const sandbox = options?.sandbox?.enabled ? options.sandbox : undefined;
   const isMemoryFlushRun = options?.trigger === "memory";
+  const isHeartbeatRun = isHeartbeatMaintenanceRun(options);
   if (isMemoryFlushRun && !options?.memoryFlushWritePath) {
     throw new Error("memoryFlushWritePath required for memory-triggered tool runs");
   }
@@ -382,7 +435,10 @@ export function createOpenClawCodingTools(options?: {
   const profilePolicy = resolveToolProfilePolicy(profile);
   const providerProfilePolicy = resolveToolProfilePolicy(providerProfile);
 
-  const runtimeProfileAlsoAllow = options?.forceMessageTool ? ["message"] : [];
+  const runtimeProfileAlsoAllow = [
+    ...(options?.forceMessageTool ? ["message"] : []),
+    ...(isHeartbeatRun ? ["emit_drift_proposal"] : []),
+  ];
   const profilePolicyWithAlsoAllow = mergeAlsoAllowPolicy(profilePolicy, [
     ...(profileAlsoAllow ?? []),
     ...runtimeProfileAlsoAllow,
@@ -563,6 +619,7 @@ export function createOpenClawCodingTools(options?: {
         : []
       : []),
     ...(applyPatchTool ? [applyPatchTool as unknown as AnyAgentTool] : []),
+    ...(isHeartbeatRun ? [createHeartbeatDriftProposalTool() as unknown as AnyAgentTool] : []),
     execTool as unknown as AnyAgentTool,
     processTool as unknown as AnyAgentTool,
     // Channel docking: include channel-defined agent tools (login, etc.).
@@ -619,9 +676,25 @@ export function createOpenClawCodingTools(options?: {
       allowGatewaySubagentBinding: options?.allowGatewaySubagentBinding,
     }),
   ];
+  const toolsForHeartbeatMaintenance = isHeartbeatRun
+    ? tools.flatMap((tool) => {
+        if (HEARTBEAT_DISABLED_TOOL_NAMES.has(tool.name)) {
+          return [];
+        }
+        if (tool.name === "write" || tool.name === "edit") {
+          return [
+            wrapToolHeartbeatStateWriteGuard(tool, {
+              root: sandboxRoot ?? workspaceRoot,
+              containerWorkdir: sandbox?.containerWorkdir,
+            }),
+          ];
+        }
+        return [tool];
+      })
+    : tools;
   const toolsForMemoryFlush =
     isMemoryFlushRun && memoryFlushWritePath
-      ? tools.flatMap((tool) => {
+      ? toolsForHeartbeatMaintenance.flatMap((tool) => {
           if (!MEMORY_FLUSH_ALLOWED_TOOL_NAMES.has(tool.name)) {
             return [];
           }
@@ -640,7 +713,7 @@ export function createOpenClawCodingTools(options?: {
           }
           return [tool];
         })
-      : tools;
+      : toolsForHeartbeatMaintenance;
   const toolsForMessageProvider = filterToolsByMessageProvider(
     toolsForMemoryFlush,
     options?.messageProvider,

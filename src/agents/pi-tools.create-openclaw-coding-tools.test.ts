@@ -147,6 +147,82 @@ describe("createOpenClawCodingTools", () => {
     expect(names.has("apply_patch")).toBe(false);
   });
 
+  it("makes heartbeat maintenance proposal-only for STATE.md drift", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-heartbeat-tools-"));
+    const queueDir = path.join(tmpDir, "heartbeat-proposals");
+    const previousQueueDir = process.env.OPENCLAW_HEARTBEAT_PROPOSAL_DIR;
+    process.env.OPENCLAW_HEARTBEAT_PROPOSAL_DIR = queueDir;
+    try {
+      const tools = createOpenClawCodingTools({
+        sessionKey: "heartbeat",
+        workspaceDir: tmpDir,
+        modelProvider: "openai",
+        modelId: "gpt-5.4",
+      });
+      const heartbeatNames = new Set(tools.map((tool) => tool.name));
+      expect(heartbeatNames.has("emit_drift_proposal")).toBe(true);
+      expect(heartbeatNames.has("read")).toBe(true);
+      expect(heartbeatNames.has("write")).toBe(true);
+      expect(heartbeatNames.has("edit")).toBe(true);
+      expect(heartbeatNames.has("apply_patch")).toBe(false);
+      expect(heartbeatNames.has("exec")).toBe(false);
+      expect(heartbeatNames.has("process")).toBe(false);
+
+      const writeTool = tools.find((tool) => tool.name === "write");
+      const editTool = tools.find((tool) => tool.name === "edit");
+      const proposalTool = tools.find((tool) => tool.name === "emit_drift_proposal");
+      expect(writeTool).toBeDefined();
+      expect(editTool).toBeDefined();
+      expect(proposalTool).toBeDefined();
+
+      await writeTool?.execute("tool-write-note", {
+        path: "note.md",
+        content: "allowed",
+      });
+      await expect(
+        writeTool?.execute("tool-write-state", {
+          path: "STATE.md",
+          content: "blocked",
+        }),
+      ).rejects.toThrow(/emit_drift_proposal/);
+
+      await fs.writeFile(path.join(tmpDir, "STATE.md"), "- arousal_state: engaged\n", "utf-8");
+      await expect(
+        editTool?.execute("tool-edit-state", {
+          path: "STATE.md",
+          edits: [{ oldText: "engaged", newText: "ventral_vagal" }],
+        }),
+      ).rejects.toThrow(/emit_drift_proposal/);
+
+      const result = await proposalTool?.execute("tool-emit-proposal", {
+        proposed_drift: { arousal_state: "ventral_vagal" },
+        reason: "synthetic heartbeat test",
+        conversation_id: "heartbeat-test",
+      });
+      const details = result?.details as { path?: string; status?: string } | undefined;
+      expect(details?.status).toBe("pending");
+      expect(details?.path).toContain(queueDir);
+
+      const files = await fs.readdir(queueDir);
+      expect(files).toHaveLength(1);
+      const proposal = JSON.parse(await fs.readFile(path.join(queueDir, files[0]!), "utf-8")) as {
+        source?: string;
+        status?: string;
+        proposed_drift?: Record<string, unknown>;
+      };
+      expect(proposal.source).toBe("heartbeat");
+      expect(proposal.status).toBe("pending");
+      expect(proposal.proposed_drift?.arousal_state).toBe("ventral_vagal");
+    } finally {
+      if (previousQueueDir === undefined) {
+        delete process.env.OPENCLAW_HEARTBEAT_PROPOSAL_DIR;
+      } else {
+        process.env.OPENCLAW_HEARTBEAT_PROPOSAL_DIR = previousQueueDir;
+      }
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("provides top-level object schemas for all tools", () => {
     const tools = createOpenClawCodingTools({ config: testConfig });
     const offenders = tools
