@@ -56,8 +56,14 @@ export function buildDiscordInboundJob(
   } = ctx;
 
   const sanitizedMessage = sanitizeDiscordInboundMessage(message);
+  const baseQueueKey = resolveDiscordInboundJobQueueKey(ctx);
+  const queueKey =
+    ctx.pretypingTrace?.debounceBypassed === true &&
+    ctx.pretypingTrace.debounceBypassReason === "DIRECT_QWEN_FAST_PATH_CANDIDATE"
+      ? `${baseQueueKey}:direct-qwen-fast`
+      : baseQueueKey;
   return {
-    queueKey: resolveDiscordInboundJobQueueKey(ctx),
+    queueKey,
     payload: {
       ...payload,
       message: sanitizedMessage,

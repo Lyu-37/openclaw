@@ -653,8 +653,8 @@ export async function runEmbeddedAttempt(
       modelApi: params.model.api,
       model: params.model,
     });
-    const clientTools = toolsEnabled ? params.clientTools : undefined;
-    const bundleMcpSessionRuntime = toolsEnabled
+    const clientTools = toolsEnabled && !params.disableTools ? params.clientTools : undefined;
+    const bundleMcpSessionRuntime = toolsEnabled && !params.disableTools
       ? await getOrCreateSessionMcpRuntime({
           sessionId: params.sessionId,
           sessionKey: params.sessionKey,
@@ -671,7 +671,7 @@ export async function runEmbeddedAttempt(
           ],
         })
       : undefined;
-    const bundleLspRuntime = toolsEnabled
+    const bundleLspRuntime = toolsEnabled && !params.disableTools
       ? await createBundleLspToolRuntime({
           workspaceDir: effectiveWorkspace,
           cfg: params.config,
@@ -729,7 +729,7 @@ export async function runEmbeddedAttempt(
         }) ?? [])
       : undefined;
     const promptCapabilities =
-      runtimeChannel && params.config
+      runtimeChannel && params.config && !params.disableTools
         ? resolveChannelMessageToolCapabilities({
             cfg: params.config,
             channel: runtimeChannel,
@@ -768,7 +768,7 @@ export async function runEmbeddedAttempt(
       model: params.model,
     });
     // Resolve channel-specific message actions for system prompt
-    const channelActions = runtimeChannel
+    const channelActions = runtimeChannel && !params.disableTools
       ? listChannelSupportedActions(
           buildEmbeddedMessageActionDiscoveryInput({
             cfg: params.config,
@@ -785,7 +785,7 @@ export async function runEmbeddedAttempt(
           }),
         )
       : undefined;
-    const messageToolHints = runtimeChannel
+    const messageToolHints = runtimeChannel && !params.disableTools
       ? resolveChannelMessageToolHints({
           cfg: params.config,
           channel: runtimeChannel,
@@ -2265,8 +2265,6 @@ export async function runEmbeddedAttempt(
             await params.onBlockReplyFlush();
           }
 
-          // Skip compaction wait when yield aborted the run — the signal is
-          // already tripped and abortable() would immediately reject.
           const compactionRetryWait = yieldAborted
             ? { timedOut: false }
             : await waitForCompactionRetryWithAggregateTimeout({

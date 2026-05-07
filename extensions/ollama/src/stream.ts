@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { appendFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import path from "node:path";
 import type { StreamFn } from "@mariozechner/pi-agent-core";
 import type {
   AssistantMessage,
@@ -37,6 +40,32 @@ import {
 import { buildOllamaBaseUrlSsrFPolicy } from "./provider-models.js";
 
 const log = createSubsystemLogger("ollama-stream");
+
+function appendQwen35PayloadDebug(payload: {
+  debugEvent?: "payload_built" | "response_end" | "error";
+  model: string;
+  stream: unknown;
+  think: unknown;
+  keepAlive: unknown;
+  numPredict: unknown;
+  promptCharEstimate: number;
+  messageCount: number;
+  ollamaFetchStartAt?: string | null;
+  ollamaResponseEndAt?: string | null;
+  ollamaMs?: number | null;
+  success?: boolean;
+  errorCode?: string | null;
+}) {
+  const stateDir = process.env.OPENCLAW_STATE_DIR || path.join(homedir(), ".openclaw");
+  const line =
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      ...payload,
+      no_raw_text: true,
+      raw_text_logged: false,
+    }) + "\n";
+  void appendFile(path.join(stateDir, "qwen35-payload-debug.jsonl"), line).catch(() => {});
+}
 
 export const OLLAMA_NATIVE_BASE_URL = OLLAMA_DEFAULT_BASE_URL;
 
@@ -163,6 +192,49 @@ function createOllamaThinkingWrapper(baseFn: StreamFn | undefined, think: boolea
   };
 }
 
+function isQwen35LightModelRef(modelId: string | undefined): boolean {
+  const normalized = normalizeLowercaseStringOrEmpty(modelId ?? "").replace(/^ollama\//, "");
+  return normalized === "qwen3.5:9b";
+}
+
+function createQwen35LightModelRuntimeWrapper(baseFn: StreamFn | undefined): StreamFn {
+  const streamFn = baseFn ?? streamSimple;
+  return (model, context, options) => {
+    if (model.api !== "ollama") {
+      return streamFn(model, context, options);
+    }
+    return streamWithPayloadPatch(streamFn, model, context, options, (payloadRecord) => {
+      const currentOptions =
+        typeof payloadRecord.options === "object" &&
+        payloadRecord.options !== null &&
+        !Array.isArray(payloadRecord.options)
+          ? (payloadRecord.options as Record<string, unknown>)
+          : {};
+      payloadRecord.think = false;
+      // qwen3.5:9b has a very slow Ollama streaming first-token path locally even
+      // with think:false. Low-risk Discord replies are short, so use a non-stream
+      // Ollama request while still returning a normal OpenClaw event stream.
+      payloadRecord.stream = false;
+      payloadRecord.keep_alive ??= "15m";
+      payloadRecord.options = {
+        ...currentOptions,
+        num_predict:
+          typeof currentOptions.num_predict === "number" && Number.isFinite(currentOptions.num_predict)
+            ? Math.min(Math.max(1, Math.floor(currentOptions.num_predict)), 160)
+            : 160,
+        temperature:
+          typeof currentOptions.temperature === "number" && Number.isFinite(currentOptions.temperature)
+            ? currentOptions.temperature
+            : 0.55,
+        top_p:
+          typeof currentOptions.top_p === "number" && Number.isFinite(currentOptions.top_p)
+            ? currentOptions.top_p
+            : 0.9,
+      };
+    });
+  };
+}
+
 function resolveOllamaCompatNumCtx(model: ProviderRuntimeModel): number {
   return Math.max(1, Math.floor(model.contextWindow ?? model.maxTokens ?? DEFAULT_CONTEXT_TOKENS));
 }
@@ -205,6 +277,10 @@ export function createConfiguredOllamaCompatStreamWrapper(
     // Any non-off ThinkLevel (minimal, low, medium, high, xhigh, adaptive, max)
     // should enable Ollama's native thinking mode.
     streamFn = createOllamaThinkingWrapper(streamFn, true);
+  }
+
+  if (isQwen35LightModelRef(model?.id ?? ctx.modelId)) {
+    streamFn = createQwen35LightModelRuntimeWrapper(streamFn);
   }
 
   if (normalizeProviderId(ctx.provider) === "ollama" && isOllamaCloudKimiModelRef(ctx.modelId)) {
@@ -619,6 +695,18 @@ export function createOllamaStreamFn(
     const stream = createAssistantMessageEventStream();
 
     const run = async () => {
+      let qwen35DebugPayload:
+        | {
+            model: string;
+            stream: unknown;
+            think: unknown;
+            keepAlive: unknown;
+            numPredict: unknown;
+            promptCharEstimate: number;
+            messageCount: number;
+          }
+        | undefined;
+      let qwen35FetchStartMs: number | undefined;
       try {
         const ollamaMessages = convertToOllamaMessages(
           context.messages ?? [],
@@ -634,13 +722,54 @@ export function createOllamaStreamFn(
           ollamaOptions.num_predict = options.maxTokens;
         }
 
+        const useQwen35LightRuntimePayload = isQwen35LightModelRef(model.id);
         const body = buildOllamaChatRequest({
           modelId: model.id,
           messages: ollamaMessages,
-          stream: true,
+          stream: useQwen35LightRuntimePayload ? false : true,
           tools: ollamaTools,
           options: ollamaOptions,
         });
+        if (useQwen35LightRuntimePayload) {
+          const bodyRecord = body as OllamaChatRequest & Record<string, unknown>;
+          const bodyOptions =
+            typeof body.options === "object" && body.options !== null && !Array.isArray(body.options)
+              ? (body.options as Record<string, unknown>)
+              : {};
+          bodyRecord.think = false;
+          bodyRecord.keep_alive ??= "15m";
+          body.options = {
+            ...bodyOptions,
+            num_predict:
+              typeof bodyOptions.num_predict === "number" && Number.isFinite(bodyOptions.num_predict)
+                ? Math.min(Math.max(1, Math.floor(bodyOptions.num_predict)), 160)
+                : 160,
+            temperature:
+              typeof bodyOptions.temperature === "number" && Number.isFinite(bodyOptions.temperature)
+                ? bodyOptions.temperature
+                : 0.55,
+            top_p:
+              typeof bodyOptions.top_p === "number" && Number.isFinite(bodyOptions.top_p)
+                ? bodyOptions.top_p
+                : 0.9,
+          };
+          qwen35DebugPayload = {
+            model: model.id,
+            stream: body.stream,
+            think: bodyRecord.think,
+            keepAlive: bodyRecord.keep_alive,
+            numPredict: body.options.num_predict,
+            messageCount: ollamaMessages.length,
+            promptCharEstimate: ollamaMessages.reduce(
+              (sum, message) => sum + String(message.content ?? "").length,
+              0,
+            ),
+          };
+          appendQwen35PayloadDebug({
+            debugEvent: "payload_built",
+            ...qwen35DebugPayload,
+          });
+        }
         options?.onPayload?.(body, model);
         const headers: Record<string, string> = {
           "Content-Type": "application/json",
@@ -654,6 +783,7 @@ export function createOllamaStreamFn(
           headers.Authorization = `Bearer ${options.apiKey}`;
         }
 
+        qwen35FetchStartMs = useQwen35LightRuntimePayload ? Date.now() : undefined;
         const { response, release } = await fetchWithSsrFGuard({
           url: chatUrl,
           init: {
@@ -845,6 +975,17 @@ export function createOllamaStreamFn(
           const assistantMessage = buildAssistantMessage(finalResponse, modelInfo);
           closeThinkingBlock();
           closeTextBlock();
+          if (qwen35DebugPayload && typeof qwen35FetchStartMs === "number") {
+            const qwen35ResponseEndMs = Date.now();
+            appendQwen35PayloadDebug({
+              debugEvent: "response_end",
+              ...qwen35DebugPayload,
+              ollamaFetchStartAt: new Date(qwen35FetchStartMs).toISOString(),
+              ollamaResponseEndAt: new Date(qwen35ResponseEndMs).toISOString(),
+              ollamaMs: Math.max(0, qwen35ResponseEndMs - qwen35FetchStartMs),
+              success: true,
+            });
+          }
 
           stream.push({
             type: "done",
@@ -855,6 +996,24 @@ export function createOllamaStreamFn(
           await release();
         }
       } catch (err) {
+        if (qwen35DebugPayload) {
+          const qwen35ResponseEndMs = Date.now();
+          appendQwen35PayloadDebug({
+            debugEvent: "error",
+            ...qwen35DebugPayload,
+            ollamaFetchStartAt:
+              typeof qwen35FetchStartMs === "number"
+                ? new Date(qwen35FetchStartMs).toISOString()
+                : null,
+            ollamaResponseEndAt: new Date(qwen35ResponseEndMs).toISOString(),
+            ollamaMs:
+              typeof qwen35FetchStartMs === "number"
+                ? Math.max(0, qwen35ResponseEndMs - qwen35FetchStartMs)
+                : null,
+            success: false,
+            errorCode: err instanceof Error ? err.name : "UnknownError",
+          });
+        }
         stream.push({
           type: "error",
           reason: "error",

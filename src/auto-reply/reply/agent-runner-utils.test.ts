@@ -97,7 +97,13 @@ describe("agent-runner-utils", () => {
   });
 
   it("builds embedded run base params with auth profile and run metadata", () => {
-    const run = makeRun({ enforceFinalTag: true });
+    const run = makeRun({
+      enforceFinalTag: true,
+      disableTools: true,
+      toolsAllow: ["__openclaw_light_model_no_tools__"],
+      bootstrapContextMode: "lightweight",
+      bootstrapContextRunKind: "default",
+    });
     const authProfile = resolveProviderScopedAuthProfile({
       provider: "openai",
       primaryProvider: "openai",
@@ -132,6 +138,10 @@ describe("agent-runner-utils", () => {
       bashElevated: run.bashElevated,
       timeoutMs: run.timeoutMs,
       runId: "run-1",
+      disableTools: true,
+      toolsAllow: ["__openclaw_light_model_no_tools__"],
+      bootstrapContextMode: "lightweight",
+      bootstrapContextRunKind: "default",
     });
   });
 

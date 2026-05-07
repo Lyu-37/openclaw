@@ -1,4 +1,5 @@
 import type { Client } from "@buape/carbon";
+import crypto from "node:crypto";
 import {
   createChannelInboundDebouncer,
   shouldDebounceTextInbound,
@@ -22,6 +23,7 @@ import type { DiscordMessageEvent, DiscordMessageHandler } from "./listeners.js"
 import { applyImplicitReplyBatchGate } from "./message-handler.batch-gate.js";
 import { preflightDiscordMessage } from "./message-handler.preflight.js";
 import type { DiscordMessagePreflightParams } from "./message-handler.preflight.types.js";
+import type { DiscordPretypingTraceMeta } from "./message-handler.preflight.types.js";
 import {
   hasDiscordMessageStickers,
   resolveDiscordMessageChannelId,
@@ -49,6 +51,57 @@ export type DiscordMessageHandlerWithLifecycle = DiscordMessageHandler & {
 
 function isNonEmptyString(value: string | undefined): value is string {
   return typeof value === "string" && value.length > 0;
+}
+
+function hashDiscordTraceText(text: string): string {
+  return crypto.createHash("sha256").update(text).digest("hex");
+}
+
+function resolveDiscordMessageCreatedMs(data: DiscordMessageEvent): number | null {
+  const timestamp = data.message?.timestamp;
+  if (typeof timestamp !== "string" || !timestamp) {
+    return null;
+  }
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function createDiscordPretypingTrace(data: DiscordMessageEvent): DiscordPretypingTraceMeta {
+  const baseText = resolveDiscordMessageText(data.message, { includeForwarded: false }) ?? "";
+  return {
+    traceId: crypto.randomUUID(),
+    messageHash: hashDiscordTraceText(baseText),
+    discordMessageCreatedMs: resolveDiscordMessageCreatedMs(data),
+    discordEventReceivedMs: Date.now(),
+  };
+}
+
+function shouldBypassDebounceForDirectQwenCandidate(data: DiscordMessageEvent): boolean {
+  const message = data.message;
+  if (!message) {
+    return false;
+  }
+  const text = (resolveDiscordMessageText(message, { includeForwarded: false }) ?? "").trim();
+  if (!text || text.length > 180) {
+    return false;
+  }
+  if (message.attachments?.length || hasDiscordMessageStickers(message)) {
+    return false;
+  }
+  if (/^[/!$]/.test(text) || /\bhttps?:\/\/\S+/i.test(text)) {
+    return false;
+  }
+  const boundaryPattern =
+    /不想活|想死|活不下去|自杀|自伤|伤害自己|没有位置|她.*保持距离|保持距离.*她|现实朋友|朋友边界|亲密关系|替代感|太依赖|你真的懂我|敷衍|你会不会离开|Yuan|宋予安|persona|SOUL\.md|private-chat|private chat|P2|memory|记忆|训练|LoRA|QLoRA|fine[- ]?tune|主模型|轻模型|router|路由/i;
+  if (boundaryPattern.test(text)) {
+    return false;
+  }
+  return (
+    text.length <= 80 ||
+    /问问|吃|饭|书|小说|游戏|消遣|复习|学校|作业|歌|洗澡|忙|轻松|不费脑|架空|冒险|悲剧|改自然|整理/.test(
+      text,
+    )
+  );
 }
 
 export function createDiscordMessageHandler(
@@ -80,6 +133,7 @@ export function createDiscordMessageHandler(
     client: Client;
     abortSignal?: AbortSignal;
     replayKey?: string;
+    pretypingTrace: DiscordPretypingTraceMeta;
   }>({
     cfg: params.cfg,
     channel: "discord",
@@ -129,6 +183,7 @@ export function createDiscordMessageHandler(
         return;
       }
       try {
+        const replyGateStartMs = Date.now();
         if (entries.length === 1) {
           const ctx = await preflightDiscordMessageImpl({
             ...params,
@@ -143,6 +198,12 @@ export function createDiscordMessageHandler(
             return;
           }
           applyImplicitReplyBatchGate(ctx, params.replyToMode, false);
+          ctx.pretypingTrace = {
+            ...last.pretypingTrace,
+            replyGateStartMs,
+            replyGateEndMs: Date.now(),
+            replyJobEnqueuedMs: Date.now(),
+          };
           inboundWorker.enqueue(buildDiscordInboundJob(ctx, { replayKeys }));
           return;
         }
@@ -193,6 +254,12 @@ export function createDiscordMessageHandler(
             ctxBatch.MessageSidLast = ids[ids.length - 1];
           }
         }
+        ctx.pretypingTrace = {
+          ...last.pretypingTrace,
+          replyGateStartMs,
+          replyGateEndMs: Date.now(),
+          replyJobEnqueuedMs: Date.now(),
+        };
         inboundWorker.enqueue(buildDiscordInboundJob(ctx, { replayKeys }));
       } catch (error) {
         if (error instanceof DiscordRetryableInboundError) {
@@ -235,11 +302,50 @@ export function createDiscordMessageHandler(
         return;
       }
 
+      const pretypingTrace = createDiscordPretypingTrace(data);
+      if (shouldBypassDebounceForDirectQwenCandidate(data)) {
+        const replayKeys = replayKey ? [replayKey] : [];
+        try {
+          const replyGateStartMs = Date.now();
+          const ctx = await preflightDiscordMessageImpl({
+            ...params,
+            ackReactionScope,
+            groupPolicy,
+            abortSignal: options?.abortSignal,
+            data,
+            client,
+          });
+          if (!ctx) {
+            await commitDiscordInboundReplay({ replayKeys, replayGuard });
+            return;
+          }
+          applyImplicitReplyBatchGate(ctx, params.replyToMode, false);
+          ctx.pretypingTrace = {
+            ...pretypingTrace,
+            replyGateStartMs,
+            replyGateEndMs: Date.now(),
+            replyJobEnqueuedMs: Date.now(),
+            debounceBypassed: true,
+            debounceBypassReason: "DIRECT_QWEN_FAST_PATH_CANDIDATE",
+          };
+          inboundWorker.enqueue(buildDiscordInboundJob(ctx, { replayKeys }));
+        } catch (error) {
+          if (error instanceof DiscordRetryableInboundError) {
+            releaseDiscordInboundReplay({ replayKeys, error, replayGuard });
+          } else {
+            await commitDiscordInboundReplay({ replayKeys, replayGuard });
+          }
+          throw error;
+        }
+        return;
+      }
+
       await debouncer.enqueue({
         data,
         client,
         abortSignal: options?.abortSignal,
         replayKey: replayKey ?? undefined,
+        pretypingTrace,
       });
     } catch (err) {
       params.runtime.error?.(danger(`handler failed: ${String(err)}`));

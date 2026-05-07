@@ -188,6 +188,8 @@ export function createDiscordInboundWorker(
   params: DiscordInboundWorkerParams,
 ): DiscordInboundWorker {
   const runQueue = new KeyedAsyncQueue();
+  const queuedByKey = new Map<string, number>();
+  let activeJobs = 0;
   const runState = createRunStateMachine({
     setStatus: params.setStatus,
     abortSignal: params.abortSignal,
@@ -196,8 +198,31 @@ export function createDiscordInboundWorker(
 
   return {
     enqueue(job) {
+      const queuedBefore = queuedByKey.get(job.queueKey) ?? 0;
+      queuedByKey.set(job.queueKey, queuedBefore + 1);
+      if (job.payload.pretypingTrace) {
+        job.payload.pretypingTrace = {
+          ...job.payload.pretypingTrace,
+          replyJobEnqueuedMs: job.payload.pretypingTrace.replyJobEnqueuedMs ?? Date.now(),
+          queueName: job.queueKey,
+          queueDepthAtEnqueue: queuedBefore,
+          activeJobs,
+        };
+      }
       void runQueue
         .enqueue(job.queueKey, async () => {
+          const queuedAtStart = Math.max(0, (queuedByKey.get(job.queueKey) ?? 1) - 1);
+          queuedByKey.set(job.queueKey, queuedAtStart);
+          activeJobs += 1;
+          if (job.payload.pretypingTrace) {
+            job.payload.pretypingTrace = {
+              ...job.payload.pretypingTrace,
+              replyJobStartedMs: Date.now(),
+              queueName: job.queueKey,
+              queueDepthAtStart: queuedAtStart,
+              activeJobs,
+            };
+          }
           if (!runState.isActive()) {
             return;
           }
@@ -216,6 +241,7 @@ export function createDiscordInboundWorker(
             });
           } finally {
             runState.onRunEnd();
+            activeJobs = Math.max(0, activeJobs - 1);
           }
         })
         .catch((error) => {

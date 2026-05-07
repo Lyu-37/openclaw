@@ -57,9 +57,20 @@ import { buildSessionStartupContextPrelude, shouldApplyStartupContext } from "./
 import { resolveTypingMode } from "./typing-mode.js";
 import { resolveRunTypingPolicy } from "./typing-policy.js";
 import type { TypingController } from "./typing.js";
+import {
+  LIGHT_MODEL_COHERENCE_GUARD_ADDENDUM,
+  MAIN_MODEL_BOUNDARY_GUARD_ADDENDUM,
+  shouldApplyLightModelCoherenceGuard,
+  type ConversationRouterGenerationTrace,
+  type ConversationRouterTraceTimings,
+} from "./conversation-router-v0.js";
 
 type AgentDefaults = NonNullable<OpenClawConfig["agents"]>["defaults"];
 type ExecOverrides = Pick<ExecToolDefaults, "host" | "security" | "ask" | "node">;
+type PreparedReplyTrace = {
+  timings: ConversationRouterTraceTimings;
+  generation: ConversationRouterGenerationTrace;
+};
 
 export function buildExecOverridePromptHint(params: {
   execOverrides?: ExecOverrides;
@@ -192,6 +203,8 @@ type RunPreparedReplyParams = {
   storePath?: string;
   workspaceDir: string;
   abortedLastRun: boolean;
+  lightModelRewriteInstruction?: string;
+  trace?: PreparedReplyTrace;
 };
 
 export async function runPreparedReply(
@@ -232,7 +245,10 @@ export async function runPreparedReply(
     storePath,
     workspaceDir,
     sessionStore,
+    lightModelRewriteInstruction,
+    trace,
   } = params;
+  trace?.timings && (trace.timings.contextStartMs ??= Date.now());
   let {
     sessionEntry,
     resolvedThinkLevel,
@@ -246,6 +262,17 @@ export async function runPreparedReply(
     cfg,
     isFastTestEnv: process.env.OPENCLAW_TEST_FAST === "1",
   });
+  const useLightModelLatencyFastPath = shouldApplyLightModelCoherenceGuard({ provider, model });
+  const useLowRiskFastReplyRuntime = useFastReplyRuntime || useLightModelLatencyFastPath;
+  const lightModelRuntimePrepCacheKey = useLightModelLatencyFastPath
+    ? `qwen35-light-runtime-prep-v1:${provider}/${model}`
+    : "";
+  const lowRiskBootstrapContextMode: "lightweight" | undefined = useLowRiskFastReplyRuntime
+    ? "lightweight"
+    : undefined;
+  const lowRiskBootstrapContextRunKind: "default" | undefined = useLowRiskFastReplyRuntime
+    ? "default"
+    : undefined;
   const fullAccessState = resolveEmbeddedFullAccessState({
     execElevated: {
       enabled: elevatedEnabled,
@@ -291,13 +318,20 @@ export async function runPreparedReply(
   const groupSystemPrompt = normalizeOptionalString(sessionCtx.GroupSystemPrompt) ?? "";
   const inboundMetaPrompt = buildInboundMetaSystemPrompt(
     isNewSession ? sessionCtx : { ...sessionCtx, ThreadStarterBody: undefined },
-    { includeFormattingHints: !useFastReplyRuntime },
+    { includeFormattingHints: !useLowRiskFastReplyRuntime },
   );
   const extraSystemPromptParts = [
     inboundMetaPrompt,
     groupChatContext,
     groupIntro,
     groupSystemPrompt,
+    shouldApplyLightModelCoherenceGuard({ provider, model })
+      ? LIGHT_MODEL_COHERENCE_GUARD_ADDENDUM
+      : undefined,
+    !shouldApplyLightModelCoherenceGuard({ provider, model })
+      ? MAIN_MODEL_BOUNDARY_GUARD_ADDENDUM
+      : undefined,
+    normalizeOptionalString(lightModelRewriteInstruction),
     buildExecOverridePromptHint({
       execOverrides,
       elevatedLevel: resolvedElevatedLevel,
@@ -436,7 +470,7 @@ export async function runPreparedReply(
     prefixedCommandBody: string;
     queuedBody: string;
   }> => {
-    if (!useFastReplyRuntime) {
+    if (!useLowRiskFastReplyRuntime) {
       const eventsBlock = await drainFormattedSystemEvents({
         cfg,
         sessionKey,
@@ -460,7 +494,7 @@ export async function runPreparedReply(
     });
   };
   const skillResult =
-    process.env.OPENCLAW_TEST_FAST === "1"
+    process.env.OPENCLAW_TEST_FAST === "1" || useLightModelLatencyFastPath
       ? {
           sessionEntry,
           skillsSnapshot: sessionEntry?.skillsSnapshot,
@@ -555,7 +589,7 @@ export async function runPreparedReply(
     };
   };
   let preparedSessionState = resolvePreparedSessionState();
-  const resolvedQueue = useFastReplyRuntime
+  const resolvedQueue = useLowRiskFastReplyRuntime
     ? {
         mode: "collect" as const,
         debounceMs: 0,
@@ -569,7 +603,7 @@ export async function runPreparedReply(
         inlineMode: perMessageQueueMode,
         inlineOptions: perMessageQueueOptions,
       });
-  const piRuntime = useFastReplyRuntime ? null : await loadPiEmbeddedRuntime();
+  const piRuntime = useLowRiskFastReplyRuntime ? null : await loadPiEmbeddedRuntime();
   const sessionLaneKey = piRuntime
     ? piRuntime.resolveEmbeddedSessionLane(sessionKey ?? sessionIdFinal)
     : undefined;
@@ -582,7 +616,7 @@ export async function runPreparedReply(
     );
     logVerbose(`Interrupting ${sessionLaneKey} (cleared ${cleared}, aborted=${aborted})`);
   }
-  let authProfileId = useFastReplyRuntime
+  let authProfileId = useLowRiskFastReplyRuntime
     ? preparedSessionState.sessionEntry?.authProfileOverride
     : await resolveSessionAuthProfileOverride({
         cfg,
@@ -635,7 +669,7 @@ export async function runPreparedReply(
         piRuntime?.waitForEmbeddedPiRunEnd(activeRunSessionId) ?? Promise.resolve(undefined),
       refreshPreparedState: async () => {
         preparedSessionState = resolvePreparedSessionState();
-        authProfileId = useFastReplyRuntime
+        authProfileId = useLowRiskFastReplyRuntime
           ? preparedSessionState.sessionEntry?.authProfileOverride
           : await resolveSessionAuthProfileOverride({
               cfg,
@@ -659,6 +693,32 @@ export async function runPreparedReply(
     ({ activeSessionId, isActive, isStreaming } = queueState.busyState);
   }
   const authProfileIdSource = preparedSessionState.sessionEntry?.authProfileOverrideSource;
+  const extraSystemPrompt = extraSystemPromptParts.join("\n\n") || undefined;
+  const contextCharCount = [extraSystemPrompt, prefixedCommandBody, queuedBody]
+    .filter((part): part is string => typeof part === "string" && part.length > 0)
+    .join("\n\n").length;
+  if (trace) {
+    trace.generation.contextCharCount ??= contextCharCount;
+    trace.generation.promptTokenEstimate ??= Math.ceil(contextCharCount / 4);
+    trace.generation.memoryItemCount ??=
+      sessionStore && typeof sessionStore === "object" ? Object.keys(sessionStore).length : null;
+    trace.generation.thinkEffective ??= resolvedThinkLevel === "off" ? false : (resolvedThinkLevel ?? null);
+    trace.generation.piRuntimePrepCacheHit ??= useLightModelLatencyFastPath ? true : false;
+    trace.generation.piRuntimePrepCacheKey ??= lightModelRuntimePrepCacheKey;
+    trace.generation.cacheInvalidationReason ??= useLightModelLatencyFastPath
+      ? "NONE"
+      : "MAIN_MODEL_FULL_RUNTIME";
+    trace.generation.pluginDepsLoadMs ??= useLightModelLatencyFastPath ? 0 : null;
+    trace.generation.toolRegistryMs ??= useLightModelLatencyFastPath ? 0 : null;
+    trace.generation.systemPromptScaffoldMs ??= null;
+    trace.timings.contextEndMs ??= Date.now();
+    if (trace.generation.piRuntimePrepMs == null) {
+      trace.generation.piRuntimePrepMs =
+        typeof trace.timings.contextStartMs === "number"
+          ? Math.max(0, Date.now() - trace.timings.contextStartMs)
+          : null;
+    }
+  }
   const followupRun = {
     prompt: queuedBody,
     messageId: sessionCtx.MessageSidFull ?? sessionCtx.MessageSid,
@@ -705,7 +765,7 @@ export async function runPreparedReply(
       authProfileId,
       authProfileIdSource,
       thinkLevel: resolvedThinkLevel,
-      fastMode: useFastReplyRuntime
+      fastMode: useLowRiskFastReplyRuntime
         ? false
         : resolveFastModeState({
             cfg,
@@ -731,9 +791,14 @@ export async function runPreparedReply(
       blockReplyBreak: resolvedBlockStreamingBreak,
       ownerNumbers: command.ownerList.length > 0 ? command.ownerList : undefined,
       inputProvenance: ctx.InputProvenance ?? sessionCtx.InputProvenance,
-      extraSystemPrompt: extraSystemPromptParts.join("\n\n") || undefined,
-      skipProviderRuntimeHints: useFastReplyRuntime,
-      ...(!useFastReplyRuntime &&
+      extraSystemPrompt,
+      skipProviderRuntimeHints: useLowRiskFastReplyRuntime,
+      disableTools: useLowRiskFastReplyRuntime,
+      toolsAllow: useLowRiskFastReplyRuntime ? ["__openclaw_light_model_no_tools__"] : undefined,
+      skipPreflightCompaction: useLowRiskFastReplyRuntime,
+      bootstrapContextMode: lowRiskBootstrapContextMode,
+      bootstrapContextRunKind: lowRiskBootstrapContextRunKind,
+      ...(!useLowRiskFastReplyRuntime &&
       isReasoningTagProvider(provider, {
         config: cfg,
         workspaceDir,
@@ -744,7 +809,12 @@ export async function runPreparedReply(
     },
   };
 
-  return runReplyAgent({
+  if (trace) {
+    const modelRequestStartMs = Date.now();
+    trace.timings.modelRequestStartMs ??= modelRequestStartMs;
+    trace.timings.ollamaRequestSentMs ??= modelRequestStartMs;
+  }
+  const reply = await runReplyAgent({
     commandBody: prefixedCommandBody,
     followupRun,
     queueKey,
@@ -777,4 +847,19 @@ export async function runPreparedReply(
     typingMode,
     resetTriggered,
   });
+  if (trace) {
+    const responseEndMs = Date.now();
+    trace.timings.ollamaResponseEndMs ??= responseEndMs;
+    if (
+      typeof trace.timings.modelRequestStartMs === "number" &&
+      trace.generation.modelGenerationMs == null
+    ) {
+      trace.generation.modelGenerationMs = Math.max(
+        0,
+        responseEndMs - trace.timings.modelRequestStartMs,
+      );
+      trace.generation.ollamaTotalMs = trace.generation.modelGenerationMs;
+    }
+  }
+  return reply;
 }

@@ -175,19 +175,21 @@ export function createFollowupRunner(params: {
       let fallbackModel = run.model;
       let activeSessionEntry =
         (sessionKey ? sessionStore?.[sessionKey] : undefined) ?? sessionEntry;
-      activeSessionEntry = await runPreflightCompactionIfNeeded({
-        cfg: runtimeConfig,
-        followupRun: effectiveQueued,
-        promptForEstimate: queued.prompt,
-        defaultModel,
-        agentCfgContextTokens,
-        sessionEntry: activeSessionEntry,
-        sessionStore,
-        sessionKey,
-        storePath,
-        isHeartbeat: opts?.isHeartbeat === true,
-        replyOperation,
-      });
+      activeSessionEntry = run.skipPreflightCompaction
+        ? activeSessionEntry
+        : await runPreflightCompactionIfNeeded({
+            cfg: runtimeConfig,
+            followupRun: effectiveQueued,
+            promptForEstimate: queued.prompt,
+            defaultModel,
+            agentCfgContextTokens,
+            sessionEntry: activeSessionEntry,
+            sessionStore,
+            sessionKey,
+            storePath,
+            isHeartbeat: opts?.isHeartbeat === true,
+            replyOperation,
+          });
       let bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
         activeSessionEntry?.systemPromptReport,
       );

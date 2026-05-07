@@ -105,4 +105,35 @@ describe("rewriteInternalUserMessageForTranscript", () => {
       }),
     ).toBe(original);
   });
+
+  it("rewrites queued memory-flush user turns to the final human-visible text", () => {
+    const originalText = `[Queued user message that arrived while the previous turn was still active]
+Pre-compaction memory flush. Store durable memories only in memory/2026-04-24.md.
+If nothing to store, reply with NO_REPLY.
+Current time: Friday, April 24th, 2026 - 10:18 (America/Toronto) / 2026-04-24 14:18 UTC
+
+Conversation info (untrusted metadata):
+\`\`\`json
+{"sender":"lyuzhangkai"}
+\`\`\`
+
+你在南京大学上什么专业的课啊`;
+
+    const rewritten = rewriteInternalUserMessageForTranscript({
+      message: {
+        role: "user",
+        content: originalText,
+      },
+      prompt: originalText,
+      currentMessageId: "run-queued-user-1",
+      runId: "run-queued-user-1",
+      trigger: "user",
+    });
+
+    expect(rewritten).toEqual({
+      role: "user",
+      content: "你在南京大学上什么专业的课啊",
+      idempotencyKey: "run-queued-user-1",
+    });
+  });
 });

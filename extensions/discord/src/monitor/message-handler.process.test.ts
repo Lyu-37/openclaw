@@ -37,6 +37,7 @@ const editMessageDiscord = deliveryMocks.editMessageDiscord;
 const deliverDiscordReply = deliveryMocks.deliverDiscordReply;
 const createDiscordDraftStream = deliveryMocks.createDiscordDraftStream;
 type DispatchInboundParams = {
+  ctx?: Record<string, unknown>;
   dispatcher: {
     sendBlockReply: (payload: ReplyPayload) => boolean | Promise<boolean>;
     sendFinalReply: (payload: ReplyPayload) => boolean | Promise<boolean>;
@@ -218,6 +219,11 @@ beforeEach(() => {
   readSessionUpdatedAt.mockClear();
   resolveStorePath.mockClear();
   createDiscordRestClientSpy.mockClear();
+  createDiscordRestClientSpy.mockReturnValue({
+    token: "test-token",
+    rest: { post: vi.fn(async () => undefined) } as never,
+    account: { config: {} } as never,
+  });
   dispatchInboundMessage.mockResolvedValue(createNoQueuedDispatchResult());
   recordInboundSession.mockResolvedValue(undefined);
   readSessionUpdatedAt.mockReturnValue(undefined);
@@ -345,6 +351,53 @@ function expectSinglePreviewEdit() {
   );
   expect(deliverDiscordReply).not.toHaveBeenCalled();
 }
+
+describe("processDiscordMessage typing indicator", () => {
+  it("starts Discord typing before dispatching inbound generation", async () => {
+    const order: string[] = [];
+    const feedbackRest = {
+      post: vi.fn(async () => {
+        order.push("typing");
+      }),
+    };
+    const deliveryRest = { post: vi.fn(async () => undefined) };
+    createDiscordRestClientSpy
+      .mockReturnValueOnce({
+        token: "feedback-token",
+        rest: feedbackRest as never,
+        account: { config: {} } as never,
+      })
+      .mockReturnValueOnce({
+        token: "delivery-token",
+        rest: deliveryRest as never,
+        account: { config: {} } as never,
+      });
+    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+      order.push("dispatch");
+      const trace = params?.ctx?.PretypingTrace as
+        | { typingSendStartMs?: number; typingSendEndMs?: number }
+        | undefined;
+      expect(trace?.typingSendStartMs).toEqual(expect.any(Number));
+      expect(trace?.typingSendEndMs).toEqual(expect.any(Number));
+      return createNoQueuedDispatchResult();
+    });
+
+    const ctx = await createBaseContext({
+      pretypingTrace: {
+        traceId: "typing-order-test",
+        messageHash: "hash-only",
+        discordEventReceivedMs: Date.now(),
+        replyGateEndMs: Date.now(),
+        replyJobStartedMs: Date.now(),
+      },
+    } as never);
+
+    await runProcessDiscordMessage(ctx);
+
+    expect(order).toEqual(["typing", "dispatch"]);
+    expect(feedbackRest.post).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("processDiscordMessage ack reactions", () => {
   it("skips ack reactions for group-mentions when mentions are not required", async () => {

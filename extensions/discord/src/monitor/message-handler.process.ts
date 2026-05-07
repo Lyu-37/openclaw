@@ -86,6 +86,13 @@ function sleep(ms: number): Promise<void> {
 }
 
 const DISCORD_TYPING_MAX_DURATION_MS = 20 * 60_000;
+
+function classifyTypingSendError(error: unknown): string {
+  if (error instanceof Error && error.name) {
+    return error.name;
+  }
+  return typeof error;
+}
 let replyRuntimePromise: Promise<typeof import("openclaw/plugin-sdk/reply-runtime")> | undefined;
 
 async function loadReplyRuntime() {
@@ -107,6 +114,12 @@ export async function processDiscordMessage(
   ctx: DiscordMessagePreflightContext,
   observer?: DiscordMessageProcessObserver,
 ) {
+  const pretypingTrace = ctx.pretypingTrace
+    ? {
+        ...ctx.pretypingTrace,
+        replyJobStartedMs: ctx.pretypingTrace.replyJobStartedMs ?? Date.now(),
+      }
+    : undefined;
   const {
     cfg,
     discordConfig,
@@ -506,6 +519,9 @@ export async function processDiscordMessage(
     OriginatingChannel: "discord" as const,
     OriginatingTo: originatingTo,
   });
+  if (pretypingTrace) {
+    (ctxPayload as Record<string, unknown>).PretypingTrace = pretypingTrace;
+  }
   const persistedSessionKey = ctxPayload.SessionKey ?? route.sessionKey;
   observer?.onReplyPlanResolved?.({
     createdThreadId: replyPlan.createdThreadId,
@@ -557,6 +573,47 @@ export async function processDiscordMessage(
       maxDurationMs: DISCORD_TYPING_MAX_DURATION_MS,
     },
   });
+  let typingIndicatorStarted = false;
+  const startTypingIndicator = async () => {
+    if (typingIndicatorStarted || isProcessAborted(abortSignal)) {
+      return;
+    }
+    typingIndicatorStarted = true;
+    if (pretypingTrace) {
+      const currentTrace =
+        ((ctxPayload as Record<string, unknown>).PretypingTrace as object | undefined) ??
+        pretypingTrace;
+      (ctxPayload as Record<string, unknown>).PretypingTrace = {
+        ...currentTrace,
+        typingSendStartMs: Date.now(),
+      };
+    }
+    try {
+      await replyPipeline.typingCallbacks?.onReplyStart();
+    } catch (err) {
+      if (pretypingTrace) {
+        (ctxPayload as Record<string, unknown>).PretypingTrace = {
+          ...(((ctxPayload as Record<string, unknown>).PretypingTrace as object | undefined) ??
+            pretypingTrace),
+          typingSendError: classifyTypingSendError(err),
+        };
+      }
+      logTypingFailure({
+        log: logVerbose,
+        channel: "discord",
+        target: typingChannelId,
+        error: err,
+      });
+    } finally {
+      if (pretypingTrace) {
+        (ctxPayload as Record<string, unknown>).PretypingTrace = {
+          ...(((ctxPayload as Record<string, unknown>).PretypingTrace as object | undefined) ??
+            pretypingTrace),
+          typingSendEndMs: Date.now(),
+        };
+      }
+    }
+  };
   const tableMode = resolveMarkdownTableMode({
     cfg,
     channel: "discord",
@@ -827,6 +884,15 @@ export async function processDiscordMessage(
         const replyToId = replyReference.use();
         if (isFinal) {
           notifyFinalReplyStart();
+          if (pretypingTrace) {
+            const currentTrace =
+              ((ctxPayload as Record<string, unknown>).PretypingTrace as object | undefined) ??
+              pretypingTrace;
+            (ctxPayload as Record<string, unknown>).PretypingTrace = {
+              ...currentTrace,
+              discordReplySendStartMs: Date.now(),
+            };
+          }
         }
         await deliverDiscordReply({
           cfg,
@@ -848,6 +914,12 @@ export async function processDiscordMessage(
         });
         replyReference.markSent();
         if (isFinal) {
+          if (pretypingTrace) {
+            (ctxPayload as Record<string, unknown>).PretypingTrace = {
+              ...((ctxPayload as Record<string, unknown>).PretypingTrace as object),
+              discordReplySendEndMs: Date.now(),
+            };
+          }
           observer?.onFinalReplyDelivered?.();
         }
       },
@@ -858,7 +930,7 @@ export async function processDiscordMessage(
         if (isProcessAborted(abortSignal)) {
           return;
         }
-        await replyPipeline.typingCallbacks?.onReplyStart();
+        await startTypingIndicator();
         await statusReactions.setThinking();
       },
     });
@@ -872,6 +944,7 @@ export async function processDiscordMessage(
       dispatchAborted = true;
       return;
     }
+    await startTypingIndicator();
     dispatchResult = await dispatchInboundMessage({
       ctx: ctxPayload,
       cfg,

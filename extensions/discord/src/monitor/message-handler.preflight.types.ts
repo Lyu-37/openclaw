@@ -18,6 +18,28 @@ export type RuntimeEnv = import("openclaw/plugin-sdk/runtime-env").RuntimeEnv;
 
 export type DiscordMessageEvent = import("./listeners.js").DiscordMessageEvent;
 
+export type DiscordPretypingTraceMeta = {
+  traceId: string;
+  messageHash: string;
+  discordMessageCreatedMs?: number | null;
+  discordEventReceivedMs: number;
+  replyGateStartMs?: number | null;
+  replyGateEndMs?: number | null;
+  replyJobEnqueuedMs?: number | null;
+  replyJobStartedMs?: number | null;
+  typingSendStartMs?: number | null;
+  typingSendEndMs?: number | null;
+  typingSendError?: string | null;
+  discordReplySendStartMs?: number | null;
+  discordReplySendEndMs?: number | null;
+  queueName?: string;
+  queueDepthAtEnqueue?: number | null;
+  queueDepthAtStart?: number | null;
+  activeJobs?: number | null;
+  debounceBypassed?: boolean | null;
+  debounceBypassReason?: string | null;
+};
+
 type DiscordMessagePreflightSharedFields = {
   cfg: LoadedConfig;
   discordConfig: NonNullable<
@@ -92,6 +114,7 @@ export type DiscordMessagePreflightContext = DiscordMessagePreflightSharedFields
   historyEntry?: HistoryEntry;
   threadBindings: DiscordThreadBindingLookup;
   discordRestFetch?: typeof fetch;
+  pretypingTrace?: DiscordPretypingTraceMeta;
 };
 
 export type DiscordMessagePreflightParams = DiscordMessagePreflightSharedFields & {

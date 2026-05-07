@@ -1130,19 +1130,21 @@ export async function runReplyAgent(params: {
   try {
     await typingSignals.signalRunStart();
 
-    activeSessionEntry = await runPreflightCompactionIfNeeded({
-      cfg,
-      followupRun,
-      promptForEstimate: followupRun.prompt,
-      defaultModel,
-      agentCfgContextTokens,
-      sessionEntry: activeSessionEntry,
-      sessionStore: activeSessionStore,
-      sessionKey,
-      storePath,
-      isHeartbeat,
-      replyOperation,
-    });
+    activeSessionEntry = followupRun.run.skipPreflightCompaction
+      ? activeSessionEntry
+      : await runPreflightCompactionIfNeeded({
+          cfg,
+          followupRun,
+          promptForEstimate: followupRun.prompt,
+          defaultModel,
+          agentCfgContextTokens,
+          sessionEntry: activeSessionEntry,
+          sessionStore: activeSessionStore,
+          sessionKey,
+          storePath,
+          isHeartbeat,
+          replyOperation,
+        });
     preflightCompactionApplied =
       (activeSessionEntry?.compactionCount ?? 0) > prePreflightCompactionCount;
 

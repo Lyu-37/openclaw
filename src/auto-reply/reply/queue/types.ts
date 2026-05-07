@@ -83,6 +83,11 @@ export type FollowupRun = {
     extraSystemPrompt?: string;
     enforceFinalTag?: boolean;
     skipProviderRuntimeHints?: boolean;
+    disableTools?: boolean;
+    toolsAllow?: string[];
+    skipPreflightCompaction?: boolean;
+    bootstrapContextMode?: "full" | "lightweight";
+    bootstrapContextRunKind?: "default" | "heartbeat" | "cron";
     silentExpected?: boolean;
   };
 };

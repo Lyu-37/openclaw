@@ -215,6 +215,10 @@ export function buildEmbeddedRunBaseParams(params: {
     timeoutMs: params.run.timeoutMs,
     runId: params.runId,
     allowTransientCooldownProbe: params.allowTransientCooldownProbe,
+    disableTools: params.run.disableTools,
+    toolsAllow: params.run.toolsAllow,
+    bootstrapContextMode: params.run.bootstrapContextMode,
+    bootstrapContextRunKind: params.run.bootstrapContextRunKind,
   };
 }
 

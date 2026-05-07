@@ -69,7 +69,10 @@ function registerProviderWithPluginConfig(pluginConfig: Record<string, unknown>)
   return registerProviderMock.mock.calls[0]?.[0];
 }
 
-function captureWrappedOllamaPayload(thinkingLevel: "off" | "low" | undefined) {
+function captureWrappedOllamaPayload(
+  thinkingLevel: "off" | "low" | undefined,
+  modelId = "llama3.2:latest",
+) {
   const provider = registerProvider();
   let payloadSeen: Record<string, unknown> | undefined;
   const baseStreamFn = vi.fn((_model, _context, options) => {
@@ -96,12 +99,12 @@ function captureWrappedOllamaPayload(thinkingLevel: "off" | "low" | undefined) {
       },
     },
     provider: "ollama",
-    modelId: "qwen3.5:9b",
+    modelId,
     thinkingLevel,
     model: {
       api: "ollama",
       provider: "ollama",
-      id: "qwen3.5:9b",
+      id: modelId,
       baseUrl: "http://127.0.0.1:11434",
       contextWindow: 131_072,
     },
@@ -113,7 +116,7 @@ function captureWrappedOllamaPayload(thinkingLevel: "off" | "low" | undefined) {
     {
       api: "ollama",
       provider: "ollama",
-      id: "qwen3.5:9b",
+      id: modelId,
     } as never,
     {} as never,
     {},
@@ -494,5 +497,19 @@ describe("ollama plugin", () => {
     const { baseStreamFn, payloadSeen } = captureWrappedOllamaPayload(undefined);
     expect(baseStreamFn).toHaveBeenCalledTimes(1);
     expect(payloadSeen?.think).toBeUndefined();
+  });
+
+  it("forces qwen3.5:9b light model payloads to no-thinking with bounded output", () => {
+    const { baseStreamFn, payloadSeen } = captureWrappedOllamaPayload("low", "qwen3.5:9b");
+    const options = payloadSeen?.options as Record<string, unknown> | undefined;
+
+    expect(baseStreamFn).toHaveBeenCalledTimes(1);
+    expect(payloadSeen?.think).toBe(false);
+    expect(payloadSeen?.stream).toBe(false);
+    expect(payloadSeen?.keep_alive).toBe("15m");
+    expect(options?.num_predict).toBe(160);
+    expect(options?.temperature).toBe(0.55);
+    expect(options?.top_p).toBe(0.9);
+    expect(options?.think).toBeUndefined();
   });
 });

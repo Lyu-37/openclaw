@@ -1026,8 +1026,11 @@ export async function runAgentTurnWithFallback(params: {
                   return isMarkdownCapableMessageChannel(channel) ? "markdown" : "plain";
                 })(),
                 suppressToolErrorWarnings: params.opts?.suppressToolErrorWarnings,
-                bootstrapContextMode: params.opts?.bootstrapContextMode,
-                bootstrapContextRunKind: params.opts?.isHeartbeat ? "heartbeat" : "default",
+                bootstrapContextMode:
+                  params.followupRun.run.bootstrapContextMode ?? params.opts?.bootstrapContextMode,
+                bootstrapContextRunKind:
+                  params.followupRun.run.bootstrapContextRunKind ??
+                  (params.opts?.isHeartbeat ? "heartbeat" : "default"),
                 images: params.opts?.images,
                 imageOrder: params.opts?.imageOrder,
                 abortSignal: params.replyOperation?.abortSignal ?? params.opts?.abortSignal,

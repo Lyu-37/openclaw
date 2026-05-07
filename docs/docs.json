@@ -1605,7 +1605,8 @@
                   "help/testing",
                   "help/scripts",
                   "debug/node-issue",
-                  "diagnostics/flags"
+                  "diagnostics/flags",
+                  "diagnostics/qwen-fast-path-validation"
                 ]
               },
               {

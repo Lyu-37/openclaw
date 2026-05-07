@@ -126,7 +126,7 @@ export function shouldWarnOnOrphanedUserRepair(
 
 function extractUserMessagePlainText(content: unknown): string | undefined {
   if (typeof content === "string") {
-    const trimmed = content.trim();
+    const trimmed = stripInboundMetadata(content).trim();
     return trimmed || undefined;
   }
   if (!Array.isArray(content)) {
@@ -140,7 +140,8 @@ function extractUserMessagePlainText(content: unknown): string | undefined {
     )
     .join("\n")
     .trim();
-  return text || undefined;
+  const trimmed = stripInboundMetadata(text).trim();
+  return trimmed || undefined;
 }
 
 type TranscriptUserMessage = {
