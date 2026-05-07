@@ -27,6 +27,7 @@ type QuestionIntent =
   | "allowed_question"
   | "forbidden_question"
   | "route_away_question";
+type DriverMode = "webhook" | "manual";
 
 type SmokeTurn = {
   turnId: string;
@@ -108,9 +109,13 @@ const TEXT_CHANNEL_TYPE = 0;
 function arg(flag: string): string | undefined {
   const argv = process.argv.slice(2);
   const eq = argv.find((entry) => entry.startsWith(`${flag}=`));
-  if (eq) return eq.slice(flag.length + 1);
+  if (eq) {
+    return eq.slice(flag.length + 1);
+  }
   const idx = argv.indexOf(flag);
-  if (idx >= 0 && idx + 1 < argv.length) return argv[idx + 1];
+  if (idx >= 0 && idx + 1 < argv.length) {
+    return argv[idx + 1];
+  }
   return undefined;
 }
 
@@ -118,9 +123,22 @@ function hasFlag(flag: string): boolean {
   return process.argv.slice(2).includes(flag);
 }
 
+function parseDriverMode(): DriverMode {
+  const raw = (arg("--driver") || arg("--mode") || "webhook").trim().toLowerCase();
+  if (raw === "manual" || raw === "user" || raw === "user-message") {
+    return "manual";
+  }
+  if (raw === "webhook") {
+    return "webhook";
+  }
+  throw new Error(`Unsupported driver mode ${raw}; expected webhook or manual`);
+}
+
 function numberArg(flag: string, fallback: number): number {
   const value = arg(flag);
-  if (!value) return fallback;
+  if (!value) {
+    return fallback;
+  }
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
@@ -130,8 +148,10 @@ function sha256(text: string): string {
 }
 
 function percentile(values: number[], p: number): number | null {
-  if (values.length === 0) return null;
-  const sorted = [...values].sort((a, b) => a - b);
+  if (values.length === 0) {
+    return null;
+  }
+  const sorted = values.toSorted((a, b) => a - b);
   const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
   return sorted[idx];
 }
@@ -165,7 +185,9 @@ async function discordApi<T>(params: {
       `Discord API ${params.method} ${params.route} failed ${res.status}: ${body.slice(0, 160)}`,
     );
   }
-  if (res.status === 204) return undefined as T;
+  if (res.status === 204) {
+    return undefined as T;
+  }
   return (await res.json()) as T;
 }
 
@@ -188,7 +210,9 @@ async function webhookApi<T>(params: {
     const body = await res.text().catch(() => "");
     throw new Error(`Discord webhook ${params.method} failed ${res.status}: ${body.slice(0, 160)}`);
   }
-  if (res.status === 204) return undefined as T;
+  if (res.status === 204) {
+    return undefined as T;
+  }
   return (await res.json()) as T;
 }
 
@@ -197,8 +221,25 @@ async function resolveGuildIdFromConfig(configPath: string): Promise<string> {
   const parsed = JSON.parse(raw);
   const guilds = parsed?.channels?.discord?.guilds;
   const ids = guilds && typeof guilds === "object" ? Object.keys(guilds) : [];
-  if (ids.length === 0) throw new Error(`No Discord guilds in ${configPath}`);
+  if (ids.length === 0) {
+    throw new Error(`No Discord guilds in ${configPath}`);
+  }
   return ids[0];
+}
+
+async function resolveDiscordAllowBotsMode(
+  configPath: string,
+): Promise<"off" | "mentions" | "all"> {
+  const raw = await fs.readFile(configPath, "utf8");
+  const parsed = JSON.parse(raw);
+  const setting = parsed?.channels?.discord?.allowBots;
+  if (setting === "mentions") {
+    return "mentions";
+  }
+  if (setting === true || setting === "all") {
+    return "all";
+  }
+  return "off";
 }
 
 async function resolveChannelId(params: {
@@ -207,7 +248,9 @@ async function resolveChannelId(params: {
   explicitChannelId?: string;
   channelName: string;
 }): Promise<string> {
-  if (params.explicitChannelId) return params.explicitChannelId;
+  if (params.explicitChannelId) {
+    return params.explicitChannelId;
+  }
   const channels = await discordApi<DiscordChannel[]>({
     token: params.token,
     method: "GET",
@@ -215,11 +258,15 @@ async function resolveChannelId(params: {
   });
   const textChannels = channels.filter((channel) => channel.type === TEXT_CHANNEL_TYPE);
   const exact = textChannels.find((channel) => channel.name === params.channelName);
-  if (exact) return exact.id;
+  if (exact) {
+    return exact.id;
+  }
   const fuzzy = textChannels.find((channel) =>
     /测试|test|smoke|validation|fastpath|bot/i.test(channel.name),
   );
-  if (fuzzy) return fuzzy.id;
+  if (fuzzy) {
+    return fuzzy.id;
+  }
   throw new Error(`Could not resolve controlled test channel by name=${params.channelName}`);
 }
 
@@ -430,7 +477,9 @@ async function readRouterRecordsSince(tracePath: string, startMs: number): Promi
       }
     })
     .filter((record): record is RouterRecord => {
-      if (!record?.timestamp) return false;
+      if (!record?.timestamp) {
+        return false;
+      }
       return Date.parse(record.timestamp) >= startMs;
     });
 }
@@ -455,8 +504,59 @@ async function pollForReply(params: {
         const ts = message.timestamp ? Date.parse(message.timestamp) : 0;
         return message.author?.id === params.botId && ts >= params.afterMs;
       })
-      .sort((a, b) => Date.parse(a.timestamp ?? "") - Date.parse(b.timestamp ?? ""))[0];
-    if (candidate) return candidate;
+      .toSorted((a, b) => Date.parse(a.timestamp ?? "") - Date.parse(b.timestamp ?? ""))[0];
+    if (candidate) {
+      return candidate;
+    }
+    await sleep(params.pollMs);
+  }
+  return null;
+}
+
+function normalizeManualMessageContent(content: string | undefined, botId: string): string {
+  return (content ?? "")
+    .trim()
+    .replace(new RegExp(`^<@!?${botId}>\\s*`), "")
+    .trim();
+}
+
+async function pollForManualUserMessage(params: {
+  token: string;
+  channelId: string;
+  botId: string;
+  turn: SmokeTurn;
+  afterMs: number;
+  timeoutMs: number;
+  pollMs: number;
+  manualUserId?: string;
+}): Promise<DiscordMessage | null> {
+  const deadline = Date.now() + params.timeoutMs;
+  const targetHash = sha256(params.turn.prompt);
+  while (Date.now() < deadline) {
+    const messages = await discordApi<DiscordMessage[]>({
+      token: params.token,
+      method: "GET",
+      route: `/channels/${encodeURIComponent(params.channelId)}/messages?limit=50`,
+    });
+    const candidate = messages
+      .filter((message) => {
+        const ts = message.timestamp ? Date.parse(message.timestamp) : 0;
+        if (ts < params.afterMs) {
+          return false;
+        }
+        if (message.author?.id === params.botId || message.author?.bot) {
+          return false;
+        }
+        if (params.manualUserId && message.author?.id !== params.manualUserId) {
+          return false;
+        }
+        const normalized = normalizeManualMessageContent(message.content, params.botId);
+        return sha256(normalized) === targetHash;
+      })
+      .toSorted((a, b) => Date.parse(a.timestamp ?? "") - Date.parse(b.timestamp ?? ""))[0];
+    if (candidate) {
+      return candidate;
+    }
     await sleep(params.pollMs);
   }
   return null;
@@ -469,20 +569,55 @@ async function main() {
   const tracePath = path.join(stateDir, "router-trace-v2.jsonl");
   const outPath =
     arg("--out") ||
-    "E:\\AI\\Datasets\\ai-friend-ft\\manifests\\ai-end-v0-9-controlled-discord-long-theme-results-2026-05-07.md";
+    "E:\\AI\\Datasets\\ai-friend-ft\\manifests\\ai-end-v0-10-controlled-discord-smoke-results-2026-05-07.md";
   const progressPath =
     arg("--progress") ||
-    "E:\\AI\\Datasets\\ai-friend-ft\\manifests\\ai-end-v0-9-controlled-discord-long-theme-progress-2026-05-07.json";
-  const token = process.env.OPENCLAW_DISCORD_SMOKE_BOT_TOKEN || process.env.DISCORD_BOT_TOKEN || "";
-  if (!token) throw new Error("Missing OPENCLAW_DISCORD_SMOKE_BOT_TOKEN or DISCORD_BOT_TOKEN");
+    "E:\\AI\\Datasets\\ai-friend-ft\\manifests\\ai-end-v0-10-controlled-discord-smoke-progress-2026-05-07.json";
+  const driverMode = parseDriverMode();
   const dailyCount = numberArg("--daily", 100);
   const probeCount = numberArg("--probes", 30);
   const timeoutMs = numberArg("--timeout-ms", 90_000);
   const pollMs = numberArg("--poll-ms", 1_500);
   const channelName = arg("--channel-name") || "测试";
   const explicitChannelId = arg("--channel") || process.env.OPENCLAW_DISCORD_SMOKE_CHANNEL_ID;
+  const manualUserId = arg("--manual-user") || process.env.OPENCLAW_DISCORD_SMOKE_MANUAL_USER_ID;
   const dryRun = hasFlag("--dry-run");
+  const planOnly = hasFlag("--plan-only");
+  const turns = buildTurns(dailyCount, probeCount);
+  const startedAt = nowIso();
 
+  if (planOnly) {
+    await fs.writeFile(
+      progressPath,
+      JSON.stringify(
+        {
+          status: "PLAN_ONLY_READY",
+          started_at: startedAt,
+          driver_mode: driverMode,
+          planned_turns: turns.length,
+          daily_count: dailyCount,
+          probe_count: probeCount,
+          turn_hashes: turns.map((turn) => ({
+            turn_id: turn.turnId,
+            kind: turn.kind,
+            risk_class: turn.riskClass,
+            question_intent: turn.questionIntent,
+            user_hash: sha256(turn.prompt).slice(0, 16),
+          })),
+          no_raw_text: true,
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+    return;
+  }
+
+  const token = process.env.OPENCLAW_DISCORD_SMOKE_BOT_TOKEN || process.env.DISCORD_BOT_TOKEN || "";
+  if (!token) {
+    throw new Error("Missing OPENCLAW_DISCORD_SMOKE_BOT_TOKEN or DISCORD_BOT_TOKEN");
+  }
   const guildId = await resolveGuildIdFromConfig(configPath);
   const channelId = await resolveChannelId({ token, guildId, explicitChannelId, channelName });
   const me = await discordApi<{ id: string; username: string; bot?: boolean }>({
@@ -490,11 +625,10 @@ async function main() {
     method: "GET",
     route: "/users/@me",
   });
-  const turns = buildTurns(dailyCount, probeCount);
-  const startedAt = nowIso();
   const channelHash = sha256(channelId).slice(0, 16);
   const guildHash = sha256(guildId).slice(0, 16);
   const botHash = sha256(me.id).slice(0, 16);
+  const allowBotsMode = await resolveDiscordAllowBotsMode(configPath);
 
   if (dryRun) {
     await fs.writeFile(
@@ -506,6 +640,8 @@ async function main() {
           guild_hash: guildHash,
           channel_hash: channelHash,
           bot_hash: botHash,
+          driver_mode: driverMode,
+          discord_allow_bots_mode: allowBotsMode,
           planned_turns: turns.length,
           daily_count: dailyCount,
           probe_count: probeCount,
@@ -519,32 +655,107 @@ async function main() {
     return;
   }
 
-  const webhook = await discordApi<{ id: string; token?: string | null }>({
-    token,
-    method: "POST",
-    route: `/channels/${encodeURIComponent(channelId)}/webhooks`,
-    body: { name: `openclaw-v09-no-raw-${Date.now().toString(36)}` },
-  });
-  if (!webhook.id || !webhook.token) {
-    throw new Error("Webhook creation succeeded but did not return token");
+  if (driverMode === "webhook" && allowBotsMode === "off" && !hasFlag("--force-webhook")) {
+    throw new Error(
+      "Webhook driver cannot enter OpenClaw inbound route while discord.allowBots is off. Use --driver=manual for controlled user-message smoke, or explicitly set --force-webhook after scoping allowBots=mentions to the controlled test channel.",
+    );
   }
 
   const results: TurnResult[] = [];
+  let webhook: { id: string; token?: string | null } | null = null;
   try {
+    if (driverMode === "webhook") {
+      webhook = await discordApi<{ id: string; token?: string | null }>({
+        token,
+        method: "POST",
+        route: `/channels/${encodeURIComponent(channelId)}/webhooks`,
+        body: { name: `openclaw-v10-no-raw-${Date.now().toString(36)}` },
+      });
+      if (!webhook.id || !webhook.token) {
+        throw new Error("Webhook creation succeeded but did not return token");
+      }
+    }
+
     for (const turn of turns) {
       const routeStartMs = Date.now();
-      const content = `<@${me.id}> ${turn.prompt}`;
-      const sent = await webhookApi<DiscordMessage>({
-        webhookId: webhook.id,
-        webhookToken: webhook.token,
-        method: "POST",
-        route: "?wait=true",
-        body: {
-          content,
-          username: "OpenClaw v0.9 no-raw smoke driver",
-          allowed_mentions: { users: [me.id] },
-        },
-      });
+      let sent: DiscordMessage | null = null;
+      if (driverMode === "webhook") {
+        const content = `<@${me.id}> ${turn.prompt}`;
+        sent = await webhookApi<DiscordMessage>({
+          webhookId: webhook?.id ?? "",
+          webhookToken: webhook?.token ?? "",
+          method: "POST",
+          route: "?wait=true",
+          body: {
+            content,
+            username: "OpenClaw v0.10 no-raw smoke driver",
+            allowed_mentions: { users: [me.id] },
+          },
+        });
+      } else {
+        process.stdout.write(
+          [
+            "",
+            `[manual-smoke] ${turn.turnId} kind=${turn.kind} risk=${turn.riskClass} question=${turn.questionIntent}`,
+            "Send this exact synthetic test message in the controlled channel:",
+            turn.prompt,
+            "",
+          ].join("\n"),
+        );
+        sent = await pollForManualUserMessage({
+          token,
+          channelId,
+          botId: me.id,
+          turn,
+          afterMs: routeStartMs,
+          timeoutMs,
+          pollMs,
+          manualUserId,
+        });
+      }
+      if (!sent) {
+        results.push({
+          turnId: turn.turnId,
+          kind: turn.kind,
+          riskClass: turn.riskClass,
+          questionIntent: turn.questionIntent,
+          userHash: sha256(turn.prompt),
+          responseHash: null,
+          sentMessageId: null,
+          replyMessageId: null,
+          routeMode: "",
+          actualModel: "",
+          recommendedModel: "",
+          discordVisibleLatencyMs: null,
+          routerLatencyMs: null,
+          modelGenerationMs: null,
+          responseQuestionCount: 0,
+          responseEndedWithQuestion: false,
+          customerServiceTone: false,
+          therapyTemplate: false,
+          inventedFactRisk: false,
+          falseIntimacy: false,
+          roboticShort: false,
+          overCold: false,
+          continuityHit: null,
+          continuityMiss: null,
+          routeMismatch: false,
+          qwen35OnL4L8: false,
+          qwen35OnL6: false,
+          rawTextLogged: false,
+          rawOutputLogged: false,
+          promptDumped: false,
+          memoryWritten: false,
+          callbackEventGenP2Triggered: false,
+          error: driverMode === "manual" ? "manual_user_timeout" : "send_failed",
+        });
+        await fs.writeFile(
+          progressPath,
+          JSON.stringify(summarize(results, turns.length, driverMode), null, 2),
+          "utf8",
+        );
+        continue;
+      }
       const sentMs = sent.timestamp ? Date.parse(sent.timestamp) : Date.now();
       const reply = await pollForReply({
         token,
@@ -609,27 +820,33 @@ async function main() {
       });
       await fs.writeFile(
         progressPath,
-        JSON.stringify(summarize(results, turns.length), null, 2),
+        JSON.stringify(summarize(results, turns.length, driverMode), null, 2),
         "utf8",
       );
       await sleep(750);
     }
   } finally {
-    await webhookApi<void>({
-      webhookId: webhook.id,
-      webhookToken: webhook.token,
-      method: "DELETE",
-    }).catch(() => undefined);
+    if (webhook?.id && webhook.token) {
+      await webhookApi<void>({
+        webhookId: webhook.id,
+        webhookToken: webhook.token,
+        method: "DELETE",
+      }).catch(() => undefined);
+    }
   }
   await fs.writeFile(
     progressPath,
-    JSON.stringify(summarize(results, turns.length), null, 2),
+    JSON.stringify(summarize(results, turns.length, driverMode), null, 2),
     "utf8",
   );
-  await fs.writeFile(outPath, renderMarkdown(summarize(results, turns.length), results), "utf8");
+  await fs.writeFile(
+    outPath,
+    renderMarkdown(summarize(results, turns.length, driverMode), results),
+    "utf8",
+  );
 }
 
-function summarize(results: TurnResult[], plannedTurns: number) {
+function summarize(results: TurnResult[], plannedTurns: number, driverMode: DriverMode) {
   const daily = results.filter((result) => result.kind === "daily");
   const probes = results.filter((result) => result.kind === "route_away");
   const dailyLatency = daily
@@ -644,6 +861,7 @@ function summarize(results: TurnResult[], plannedTurns: number) {
   const q = (n: number, d: number) => (d === 0 ? 0 : Number((n / d).toFixed(4)));
   return {
     status: "CONTROLLED_DISCORD_LONG_THEME_SMOKE_RECORDED",
+    driver_mode: driverMode,
     planned_turns: plannedTurns,
     executed_turns: results.length,
     daily_turns: daily.length,
@@ -694,6 +912,9 @@ function summarize(results: TurnResult[], plannedTurns: number) {
     no_raw_text: true,
     failures: {
       reply_timeout: results.filter((result) => result.error === "reply_timeout").length,
+      manual_user_timeout: results.filter((result) => result.error === "manual_user_timeout")
+        .length,
+      send_failed: results.filter((result) => result.error === "send_failed").length,
       privacy: 0,
     },
   };
@@ -732,13 +953,13 @@ function renderMarkdown(summary: ReturnType<typeof summarize>, results: TurnResu
         }`,
     )
     .join("\n");
-  return `# AI-end v0.9 Controlled Discord Long Theme Smoke Results
+  return `# AI-end v0.10 Controlled Discord Long Theme Smoke Results
 
 status: ${summary.status}
 
 ## Scope
 
-- controlled Discord test channel / webhook driver
+- controlled Discord test channel / ${summary.driver_mode} driver
 - one long synthetic daily theme, not private-chat derived
 - no raw private-chat, no real friend chat, no training
 - no raw prompt/output/transcript written
@@ -759,7 +980,7 @@ ${failedHashes || "- none"}
 main().catch(async (error) => {
   const progressPath =
     arg("--progress") ||
-    "E:\\AI\\Datasets\\ai-friend-ft\\manifests\\ai-end-v0-9-controlled-discord-long-theme-progress-2026-05-07.json";
+    "E:\\AI\\Datasets\\ai-friend-ft\\manifests\\ai-end-v0-10-controlled-discord-smoke-progress-2026-05-07.json";
   await fs
     .writeFile(
       progressPath,
